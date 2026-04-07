@@ -1,0 +1,8 @@
+# Keeps long dashboard runs stable: large uploads + fewer surprise reruns while editing code.
+[server]
+maxUploadSize = 1024
+fileWatcherType = "none"
+
+[runner]
+# Avoid extra script passes that can make long jobs feel like they "restart".
+fastReruns = false

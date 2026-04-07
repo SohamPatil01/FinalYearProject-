@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VioLane — Traffic monitor</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg-deep: #06080c;
+      --bg-panel: #0c1018;
+      --bg-card: #111822;
+      --border: rgba(57, 255, 180, 0.12);
+      --text: #e8f0ea;
+      --muted: #6b7f88;
+      --teal: #39ffb4;
+      --teal-dim: rgba(57, 255, 180, 0.15);
+      --red: #ff5c5c;
+      --red-dim: rgba(255, 92, 92, 0.12);
+      --blue-btn: #1e3a5f;
+      --radius: 12px;
+      --font: "Outfit", system-ui, sans-serif;
+      --mono: "JetBrains Mono", ui-monospace, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg-deep);
+      color: var(--text);
+      font-family: var(--font);
+      font-size: 15px;
+    }
+    .app-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      padding: 1.25rem 1.5rem 0.75rem;
+      border-bottom: 1px solid var(--border);
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+    .app-header h1 {
+      margin: 0;
+      font-size: 1.35rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+    .app-header .tagline {
+      margin: 0.2rem 0 0;
+      font-size: 0.82rem;
+      color: var(--muted);
+      max-width: 28rem;
+    }
+    .badges {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .badge {
+      font-family: var(--mono);
+      font-size: 0.65rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      padding: 0.35rem 0.65rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--teal);
+    }
+    .badge.muted { color: var(--muted); }
+    .badge.upload { color: #7ec8ff; border-color: rgba(126, 200, 255, 0.2); }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 1fr min(340px, 100%);
+      gap: 1rem;
+      padding: 1rem 1.5rem 2rem;
+      align-items: start;
+    }
+    @media (max-width: 960px) {
+      .layout { grid-template-columns: 1fr; }
+    }
+
+    .main-col { min-width: 0; }
+
+    .control-strip {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.6rem 1rem;
+      padding: 0.65rem 0.85rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 0.65rem;
+    }
+    .control-strip .hint {
+      flex: 1 1 100%;
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin: 0;
+    }
+    .btn {
+      font-family: var(--font);
+      font-weight: 600;
+      font-size: 0.8rem;
+      padding: 0.45rem 0.9rem;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    .btn-teal {
+      background: var(--teal-dim);
+      color: var(--teal);
+      border-color: rgba(57, 255, 180, 0.35);
+    }
+    .btn-teal:hover { background: rgba(57, 255, 180, 0.22); }
+    .btn-primary {
+      background: var(--blue-btn);
+      color: #cfe8ff;
+      border-color: rgba(126, 200, 255, 0.25);
+    }
+    .btn-primary:hover { background: #254a73; }
+    .btn-ghost {
+      background: transparent;
+      color: var(--muted);
+      border-color: var(--border);
+    }
+    .btn-ghost:hover { color: var(--text); border-color: var(--muted); }
+    .btn-run {
+      background: linear-gradient(135deg, #1a4d3a 0%, #0d2820 100%);
+      color: var(--teal);
+      border-color: rgba(57, 255, 180, 0.4);
+      padding: 0.5rem 1.2rem;
+    }
+    .btn-run:disabled { opacity: 0.45; cursor: not-allowed; }
+    .file-input { display: none; }
+    .models-inline {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      align-items: center;
+    }
+    .models-inline label {
+      font-size: 0.72rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.2rem 0.45rem;
+      border-radius: 6px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      cursor: pointer;
+      color: var(--muted);
+    }
+    .models-inline label.has { color: var(--text); }
+    .models-inline input { accent-color: var(--teal); }
+    .models-inline label.disabled { opacity: 0.4; pointer-events: none; }
+    .truck-mini {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      font-size: 0.72rem;
+      color: var(--muted);
+    }
+    .truck-mini input {
+      width: 2.5rem;
+      padding: 0.2rem;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: var(--bg-deep);
+      color: var(--text);
+      font-family: var(--mono);
+      font-size: 0.7rem;
+    }
+
+    .video-shell {
+      position: relative;
+      border-radius: var(--radius);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: #000;
+      aspect-ratio: 16 / 9;
+      max-height: min(72vh, 640px);
+    }
+    .video-shell video, .video-shell .poster, .video-shell .live-frame {
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      display: block;
+      background: #000;
+    }
+    .video-shell .poster { object-fit: contain; }
+    .video-shell .live-frame { object-fit: contain; }
+    .video-shell .placeholder {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      font-size: 0.9rem;
+      text-align: center;
+      padding: 1rem;
+    }
+    .hud {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      line-height: 1.5;
+      padding: 0.5rem 0.65rem;
+      background: rgba(6, 8, 12, 0.82);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--muted);
+      pointer-events: none;
+    }
+    .hud strong { color: var(--teal); font-weight: 600; }
+    .hud .hl { color: var(--text); }
+
+    .sidebar { display: flex; flex-direction: column; gap: 0.85rem; }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+    }
+    .card h3 {
+      margin: 0 0 0.85rem;
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+    }
+    .stat-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+    .stat-big {
+      text-align: center;
+      padding: 0.65rem;
+      border-radius: 10px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+    }
+    .stat-big .label {
+      font-size: 0.62rem;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      margin-bottom: 0.25rem;
+    }
+    .stat-big .value {
+      font-size: 1.65rem;
+      font-weight: 700;
+      font-family: var(--mono);
+    }
+    .stat-big.viol .value { color: var(--teal); }
+    .stat-big.track .value { color: var(--text); }
+    .stat-sub {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-bottom: 0.5rem;
+    }
+    .stat-sub span.hl { color: var(--text); font-family: var(--mono); }
+    .speed-slider {
+      margin-top: 0.35rem;
+    }
+    .speed-slider label {
+      font-size: 0.68rem;
+      color: var(--muted);
+      display: block;
+      margin-bottom: 0.25rem;
+    }
+    .speed-slider input { width: 100%; accent-color: var(--teal); }
+
+    .zone-list { list-style: none; margin: 0; padding: 0; }
+    .zone-list li {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0.45rem 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.82rem;
+    }
+    .zone-list li:last-child { border-bottom: none; }
+    .zone-list .zname { color: var(--text); }
+    .zone-list .zcount { font-family: var(--mono); color: var(--muted); }
+    .zone-list .zdel {
+      color: var(--red);
+      opacity: 0.5;
+      font-size: 0.9rem;
+      cursor: default;
+    }
+
+    .event-log {
+      max-height: 220px;
+      overflow-y: auto;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      line-height: 1.55;
+    }
+    .event-log .ev {
+      padding: 0.35rem 0;
+      border-bottom: 1px solid rgba(255,255,255,0.04);
+      color: var(--muted);
+    }
+    .event-log .ev:last-child { border-bottom: none; }
+    .event-log .plate-txt { color: var(--teal); font-weight: 600; }
+    .event-log .ev.vio { color: #ff9a9a; }
+    .event-log .ev.pending { color: #9aabff; font-size: 0.68rem; }
+
+    .toast {
+      margin-top: 0.75rem;
+      padding: 0.65rem 0.85rem;
+      border-radius: 8px;
+      font-size: 0.82rem;
+      border: 1px solid var(--border);
+    }
+    .toast.err { border-color: rgba(255,92,92,0.4); color: #ffb4b4; background: var(--red-dim); }
+    .toast.ok { border-color: rgba(57,255,180,0.35); color: #b8ffe8; background: var(--teal-dim); }
+    .toast.wait { color: var(--muted); background: var(--bg-panel); }
+
+    .dl-row { margin-top: 0.65rem; }
+    .dl-row a {
+      color: var(--teal);
+      font-weight: 600;
+      font-size: 0.85rem;
+      text-decoration: none;
+    }
+    .dl-row a:hover { text-decoration: underline; }
+
+    .thumb-strip {
+      display: flex;
+      gap: 0.5rem;
+      overflow-x: auto;
+      margin-top: 0.75rem;
+      padding-bottom: 0.25rem;
+    }
+    .thumb-strip .t {
+      flex: 0 0 72px;
+      border-radius: 8px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      font-size: 0.58rem;
+      color: var(--muted);
+      text-align: center;
+    }
+    .thumb-strip .t img { width: 100%; aspect-ratio: 16/10; object-fit: cover; display: block; }
+    .thumb-strip .t .c { padding: 0.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  </style>
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>VioLane</h1>
+      <p class="tagline">Upload a clip for YOLO + zone rules + plate OCR. Annotated video and read log — same pipeline as the Python app.</p>
+    </div>
+    <div class="badges">
+      <span class="badge">YOLO</span>
+      <span class="badge upload">FILE UPLOAD</span>
+      <span class="badge muted">EASYOCR</span>
+      <span class="badge" id="live-badge" style="display:none;border-color:rgba(255,180,80,0.4);color:#ffb454">LIVE</span>
+    </div>
+  </header>
+
+  <div class="layout">
+    <main class="main-col">
+      <div class="control-strip">
+        <p class="hint">Select models, upload a clip, <strong>Run analysis</strong> — the main panel updates <strong>live</strong> with YOLO boxes, zones, violations, and plate tracks/OCR as each frame is processed.</p>
+        <input type="file" id="video" class="file-input" accept="video/mp4,video/quicktime,.mp4,.mov,.avi,.mkv" />
+        <button type="button" class="btn btn-teal" id="pick-file">Choose video</button>
+        <span id="file-label" style="font-size:0.78rem;color:var(--muted)">No file</span>
+        <button type="button" class="btn btn-run" id="run">Run analysis</button>
+        <div class="models-inline" id="model-boxes">Loading models…</div>
+        <div class="truck-mini">
+          truck window
+          <input type="number" id="truck_s" min="0" max="23" value="6" title="start hour" />
+          –
+          <input type="number" id="truck_e" min="1" max="24" value="22" title="end hour exclusive" />
+        </div>
+      </div>
+
+      <div class="video-shell" id="video-shell">
+        <div class="placeholder" id="ph-main">Output preview appears here when you run.<br /><span style="font-size:0.8em;opacity:0.8">Annotated frames stream <strong>live</strong> during processing.</span></div>
+        <img class="live-frame" id="live-frame" alt="" style="display:none" />
+        <img class="poster" id="poster" alt="" style="display:none" />
+        <video id="player" controls playsinline style="display:none"></video>
+        <div class="hud" id="hud" style="display:none">
+          FRAME <strong id="hud-frame">0</strong> / <span class="hl" id="hud-total">0</span><br />
+          FPS <span class="hl" id="hud-fps">—</span> · ZONES <strong id="hud-zones">3</strong><br />
+          VIOLATIONS <strong id="hud-viol" style="color:var(--teal)">0</strong> · TRACKED <span class="hl" id="hud-track">0</span>
+        </div>
+      </div>
+
+      <div class="thumb-strip" id="thumbs" style="display:none"></div>
+      <div id="toast"></div>
+    </main>
+
+    <aside class="sidebar">
+      <div class="card">
+        <h3>LIVE STATS</h3>
+        <div class="stat-row">
+          <div class="stat-big viol">
+            <div class="label">VIOLATIONS</div>
+            <div class="value" id="st-viol">0</div>
+          </div>
+          <div class="stat-big track">
+            <div class="label">PLATE READS</div>
+            <div class="value" id="st-track">0</div>
+          </div>
+        </div>
+        <div class="stat-sub"><span>THIS FRAME · VIOLATIONS</span><span class="hl" id="st-frame-viol">0</span></div>
+        <div class="stat-sub"><span>FRAME</span><span class="hl" id="st-frame">0 / 0</span></div>
+        <div class="stat-sub"><span>ZONES</span><span class="hl" id="st-zones">3</span></div>
+        <div class="speed-slider">
+          <label>Playback speed (preview player)</label>
+          <input type="range" id="playback-speed" min="0.25" max="2" step="0.25" value="1" />
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>ZONES</h3>
+        <ul class="zone-list" id="zone-list">
+          <li><span class="zname">No parking</span><span class="zcount">0</span><span class="zdel">×</span></li>
+          <li><span class="zname">Signal line</span><span class="zcount">0</span><span class="zdel">×</span></li>
+          <li><span class="zname">Signal ROI</span><span class="zcount">0</span><span class="zdel">×</span></li>
+        </ul>
+      </div>
+
+      <div class="card">
+        <h3>RECENT EVENTS</h3>
+        <div class="event-log" id="event-log">
+          <div class="ev" style="opacity:0.7">Violations and plate reads stream here during a run.</div>
+        </div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const toast = $('toast');
+    const modelBoxes = $('model-boxes');
+    const player = $('player');
+    const poster = $('poster');
+    const liveFrame = $('live-frame');
+    const phMain = $('ph-main');
+    const hud = $('hud');
+    const liveBadge = $('live-badge');
+
+    $('pick-file').addEventListener('click', () => $('video').click());
+    $('video').addEventListener('change', (e) => {
+      const f = e.target.files[0];
+      $('file-label').textContent = f ? f.name : 'No file';
+    });
+
+    $('playback-speed').addEventListener('input', (e) => {
+      player.playbackRate = parseFloat(e.target.value);
+    });
+
+    async function loadCatalog() {
+      const r = await fetch('/api/catalog');
+      const data = await r.json();
+      modelBoxes.innerHTML = '';
+      for (const m of data.models) {
+        const lab = document.createElement('label');
+        lab.className = m.ready ? 'has' : 'disabled';
+        lab.innerHTML = `<input type="checkbox" name="model" value="${m.id}" ${m.ready ? '' : 'disabled'} />${m.title}`;
+        modelBoxes.appendChild(lab);
+      }
+    }
+    loadCatalog().catch(() => { modelBoxes.textContent = 'Could not load models'; });
+
+    function showToast(html, cls) {
+      toast.innerHTML = html;
+      toast.className = 'toast ' + (cls || '');
+    }
+
+    function resetOutput() {
+      player.style.display = 'none';
+      poster.style.display = 'none';
+      liveFrame.style.display = 'none';
+      liveFrame.removeAttribute('src');
+      phMain.style.display = 'flex';
+      hud.style.display = 'none';
+      liveBadge.style.display = 'none';
+      $('thumbs').style.display = 'none';
+      $('thumbs').innerHTML = '';
+      $('st-frame-viol').textContent = '0';
+      player.removeAttribute('src');
+      player.load();
+      const log = $('event-log');
+      log.innerHTML = '<div class="ev" style="opacity:0.7">Events appear live during the run…</div>';
+    }
+
+    function prependLog(html, cls) {
+      const log = $('event-log');
+      const firstHint = log.querySelector('.ev[style*="opacity"]');
+      if (firstHint) firstHint.remove();
+      const div = document.createElement('div');
+      div.className = 'ev' + (cls ? ' ' + cls : '');
+      div.innerHTML = html;
+      log.insertBefore(div, log.firstChild);
+      while (log.children.length > 80) log.removeChild(log.lastChild);
+    }
+
+    function applySummary(data) {
+      const st = data.stats || {};
+      $('st-viol').textContent = st.violations ?? data.violation_events ?? 0;
+      $('st-track').textContent = st.plates_locked ?? (data.plates || []).length;
+      $('st-frame').textContent = (st.frame || 0) + ' / ' + (st.frame_total || st.frame || 0);
+      $('st-zones').textContent = st.zones_count ?? 3;
+      $('hud-frame').textContent = st.frame || 0;
+      $('hud-total').textContent = st.frame_total || st.frame || 0;
+      $('hud-fps').textContent = (data.fps != null) ? Number(data.fps).toFixed(1) : '—';
+      $('hud-zones').textContent = st.zones_count ?? 3;
+      $('hud-viol').textContent = st.violations ?? data.violation_events ?? 0;
+      $('hud-track').textContent = st.unique_plate_tracks ?? st.plates_locked ?? 0;
+      const zl = $('zone-list');
+      zl.innerHTML = '';
+      (data.zones || []).forEach((z) => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="zname">${escapeHtml(z.name)}</span><span class="zcount">${z.violations}</span><span class="zdel">×</span>`;
+        zl.appendChild(li);
+      });
+    }
+
+    $('run').addEventListener('click', async () => {
+      const btn = $('run');
+      const v = $('video').files[0];
+      const selected = [...document.querySelectorAll('input[name="model"]:checked')].map((x) => x.value);
+      resetOutput();
+      if (!selected.length) { showToast('Select at least one model.', 'err'); return; }
+      if (!v) { showToast('Choose a video file.', 'err'); return; }
+
+      const fd = new FormData();
+      fd.append('video', v);
+      fd.append('models', selected.join(','));
+      fd.append('truck_start', $('truck_s').value);
+      fd.append('truck_end', $('truck_e').value);
+
+      btn.disabled = true;
+      liveBadge.style.display = 'inline-block';
+      showToast('Streaming frames from server… stay on this page.', 'wait');
+
+      try {
+        const res = await fetch('/api/run-stream', { method: 'POST', body: fd });
+        if (!res.ok) {
+          liveBadge.style.display = 'none';
+          const t = await res.text();
+          let j; try { j = JSON.parse(t); } catch (_) { j = {}; }
+          showToast(String(j.detail || t || res.statusText), 'err');
+          return;
+        }
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+          let sep;
+          while ((sep = buf.indexOf('\n\n')) >= 0) {
+            const chunk = buf.slice(0, sep);
+            buf = buf.slice(sep + 2);
+            if (!chunk.startsWith('data: ')) continue;
+            let ev;
+            try { ev = JSON.parse(chunk.slice(6)); } catch (_) { continue; }
+
+            if (ev.type === 'start') {
+              phMain.style.display = 'none';
+              hud.style.display = 'block';
+            }
+            if (ev.type === 'frame') {
+              if (ev.image) {
+                liveFrame.src = ev.image;
+                liveFrame.style.display = 'block';
+              }
+              $('hud-frame').textContent = ev.frame;
+              $('hud-total').textContent = ev.frame_total_est;
+              $('hud-fps').textContent = Number(ev.fps).toFixed(1);
+              $('hud-viol').textContent = ev.violations_total;
+              $('hud-track').textContent = String(ev.unique_tracks ?? 0);
+              $('st-viol').textContent = ev.violations_total;
+              $('st-track').textContent = ev.plates_locked;
+              $('st-frame').textContent = ev.frame + ' / ' + ev.frame_total_est;
+              $('st-frame-viol').textContent = (ev.violations && ev.violations.length) ? ev.violations.length : '0';
+              if (ev.violations && ev.violations.length) {
+                prependLog(`f${ev.frame} · <span class="vio">${escapeHtml(ev.violations.join(' · '))}</span>`, 'vio');
+              }
+              if (ev.plates && ev.plates.length) {
+                const pend = ev.plates.filter((p) => p.pending);
+                if (pend.length) {
+                  const bits = pend.map((p) => `P${p.tid}…`).join(' ');
+                  prependLog(`f${ev.frame} · tracking OCR · ${bits}`, 'pending');
+                }
+              }
+            }
+            if (ev.type === 'plate_new') {
+              prependLog(
+                `${ev.t_sec}s · ${escapeHtml('V' + ev.tid)} · plate <span class="plate-txt">${escapeHtml(ev.text)}</span> · OCR ${(ev.ocr || 0).toFixed(2)}`
+              );
+              const strip = $('thumbs');
+              strip.style.display = 'flex';
+              const d = document.createElement('div');
+              d.className = 't';
+              d.innerHTML = `<img src="${ev.thumb}" alt="" /><div class="c">${escapeHtml(ev.text)}</div>`;
+              strip.insertBefore(d, strip.firstChild);
+              while (strip.children.length > 28) strip.removeChild(strip.lastChild);
+            }
+            if (ev.type === 'done') {
+              liveBadge.style.display = 'none';
+              applySummary(ev);
+              $('st-frame-viol').textContent = '0';
+              liveFrame.style.display = 'none';
+              const plates = ev.plates || [];
+              if (plates.length) {
+                const strip = $('thumbs');
+                strip.innerHTML = '';
+                strip.style.display = 'flex';
+                plates.slice().reverse().slice(0, 24).forEach((p) => {
+                  const d = document.createElement('div');
+                  d.className = 't';
+                  d.innerHTML = `<img src="${p.thumb}" alt="" /><div class="c">${escapeHtml(p.text)}</div>`;
+                  strip.appendChild(d);
+                });
+              }
+              const log = $('event-log');
+              const evs = ev.recent_events || [];
+              if (evs.length) {
+                log.innerHTML = '';
+                evs.forEach((e) => {
+                  const div = document.createElement('div');
+                  div.className = 'ev';
+                  div.innerHTML = `${e.t_sec}s · ${escapeHtml(e.vid)} · ${escapeHtml(e.zone)} · plate <span class="plate-txt">${escapeHtml(e.plate)}</span>`;
+                  log.appendChild(div);
+                });
+              }
+              let dl = '';
+              if (ev.download_ready && ev.job_id) {
+                const url = '/api/download/' + ev.job_id;
+                dl = `<div class="dl-row"><a href="${url}">Download annotated MP4</a></div>`;
+                player.src = url;
+                player.style.display = 'block';
+                player.playbackRate = parseFloat($('playback-speed').value);
+              } else if (ev.poster) {
+                poster.src = ev.poster;
+                poster.style.display = 'block';
+              }
+              showToast('Done. Models: ' + (ev.models || []).join(', ') + '.' + dl, 'ok');
+            }
+            if (ev.type === 'error') {
+              liveBadge.style.display = 'none';
+              showToast(ev.message || 'Error', 'err');
+            }
+          }
+        }
+      } catch (e) {
+        liveBadge.style.display = 'none';
+        showToast('Request failed: ' + e, 'err');
+      } finally {
+        btn.disabled = false;
+        liveBadge.style.display = 'none';
+      }
+    });
+
+    function escapeHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+  </script>
+</body>
+</html>

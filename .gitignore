@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.DS_Store
+*.egg-info/
+dist/
+build/
+.env
+*.log
+
+# Duplicate of models/plate.pt at repo root
+best (1).pt
