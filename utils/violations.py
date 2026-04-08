@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Sequence, Tuple
-
-import cv2
-import numpy as np
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import config
-from utils.zones import point_inside_polygon
 
 
 def hour_in_half_open_window(hour: int, start_h: int, end_h: int) -> bool:
@@ -137,6 +133,23 @@ def _carrier_vehicle_class_name(name: str) -> bool:
 
 # Shown in logs / UI when person count on one carrier reaches the threshold.
 TRIPLE_SEAT_VIOLATION_LABEL = "Triple seat violation"
+# Helmet checkpoint: default message when a no-helmet class fires (see `check_helmet_violation_pairs`).
+HELMET_VIOLATION_LABEL = "No helmet violation"
+
+_WITHOUT_HELMET_NAME_HINTS = (
+    "no_helmet",
+    "nohelmet",
+    "no helmet",
+    "without_helmet",
+    "without helmet",
+    "withouthelmet",
+    "not_wearing",
+    "not wearing",
+    "bare_head",
+    "bare head",
+    "unhelmeted",
+    "no_helm",
+)
 
 
 def _person_like_class_name(name: str) -> bool:
@@ -147,7 +160,7 @@ def _person_like_class_name(name: str) -> bool:
 
 
 def _plate_like_class_name(name: str) -> bool:
-    """True if this YOLO class name is a license / number plate (not the dedicated plate head)."""
+    """True if this YOLO class name denotes a plate (usually an extra head on truck/triple, not ``plate.pt``)."""
     n = name.lower().replace(" ", "_").replace("-", "_")
     if n in ("plate", "plates", "numberplate", "lp"):
         return True
@@ -162,8 +175,30 @@ def _plate_like_class_name(name: str) -> bool:
     return False
 
 
+def _without_helmet_class_name(name: str) -> bool:
+    """True if YOLO class name denotes a rider **without** a helmet (violation target)."""
+    n = name.lower().replace(" ", "_").replace("-", "_")
+    if _name_matches_any(n, _WITHOUT_HELMET_NAME_HINTS):
+        return True
+    return "no_helmet" in n or "without_helmet" in n or n.startswith("nohelm")
+
+
+def infer_helmet_violation_class_ids(names) -> set[int]:
+    """
+    Class indices on the helmet checkpoint that should emit `HELMET_VIOLATION_LABEL`.
+
+    Matches common labels such as ``no_helmet``, ``without helmet``, etc.
+    """
+    idx = _normalize_yolo_names(names)
+    return {i for i, n in idx.items() if _without_helmet_class_name(n)}
+
+
 def infer_plate_like_class_ids_from_yolo_names(names) -> set[int]:
-    """Class indices whose names look like plates (used to drop truck/triple plate heads when plate.pt runs)."""
+    """Class indices whose names look like plates — stripped from truck/triple outputs when plate.pt is on.
+
+    Plates are always detected via the dedicated plate model; these auxiliary plate classes are ignored
+    so rules and overlays do not duplicate or conflict with ``plate.pt`` boxes.
+    """
     idx = _normalize_yolo_names(names)
     return {i for i, n in idx.items() if _plate_like_class_name(n)}
 
@@ -306,33 +341,30 @@ def _nms_by_iou(dets: List[dict], iou_thresh: float) -> List[dict]:
 
 class ViolationManager:
     """
-    Handles rule-based checks:
-    - Triple seat (enough person detections on one vehicle)
-    - Truck restricted-time
-    - No parking with zone dwell time
-    - Crossing signal line on red
+    Rule-based checks: triple seat, helmet (no-helmet classes), truck restricted-time.
     """
 
     def __init__(
         self,
-        no_parking_threshold_sec: int,
         truck_restricted_start: int,
         truck_restricted_end: int,
         triple_class_allowlist: Optional[List[int]] = None,
         triple_semantics: Optional[Dict[str, Any]] = None,
+        helmet_viol_class_ids: Optional[Set[int]] = None,
     ) -> None:
-        self.no_parking_threshold_sec = no_parking_threshold_sec
         self.truck_restricted_start = truck_restricted_start
         self.truck_restricted_end = truck_restricted_end
         # From triple YOLO `.names` when TRIPLE_AUTO_CLASS_FILTER and no explicit config list
         self.triple_class_allowlist: Optional[List[int]] = triple_class_allowlist
         # motorcycle+person style triple head (see infer_triple_semantics_from_yolo_names)
         self.triple_semantics: Optional[Dict[str, Any]] = triple_semantics
+        # Class IDs on helmet model that mean "no helmet" (empty set / None → no helmet rule)
+        self.helmet_viol_class_ids: Set[int] = set(helmet_viol_class_ids or [])
 
-        # (zone_name, object_id) -> first timestamp seen in zone
-        self.zone_entry_times: Dict[Tuple[str, int], datetime] = {}
         # (cell_x, cell_y) -> consecutive frames with a triple candidate in that cell
         self._triple_cell_streak: Dict[Tuple[int, int], int] = {}
+        # Same for helmet violations (separate grid so triple and helmet do not share streak state)
+        self._helmet_cell_streak: Dict[Tuple[int, int], int] = {}
 
     def _expand_bbox(self, bbox: List[int], frac: float) -> List[int]:
         x1, y1, x2, y2 = bbox
@@ -511,6 +543,57 @@ class ViolationManager:
     def check_triple_riding(self, detections: List[dict]) -> List[str]:
         return [m for m, _ in self.check_triple_riding_pairs(detections)]
 
+    def check_helmet_violation_pairs(self, detections: List[dict]) -> List[Tuple[str, List[int]]]:
+        """
+        Flag **no-helmet** class detections from the helmet YOLO head.
+
+        Other classes (``helmet``, ``motorcycle``, ``rider``, …) are drawn for context but only
+        configured violation classes emit `HELMET_VIOLATION_LABEL`.
+        """
+        viol_ids = self.helmet_viol_class_ids
+        if not viol_ids:
+            return []
+
+        min_conf = float(getattr(config, "HELMET_MIN_CONFIDENCE", 0.35))
+        merge_iou = float(getattr(config, "HELMET_MERGE_IOU", 0.45))
+        min_streak = max(1, int(getattr(config, "HELMET_MIN_CONSECUTIVE_FRAMES", 1)))
+        cell_px = max(16, int(getattr(config, "HELMET_STREAK_CELL_PX", 64)))
+
+        candidates: List[dict] = []
+        for det in detections:
+            if det.get("model") != "helmet":
+                continue
+            if float(det.get("confidence", 0.0)) < min_conf:
+                continue
+            if int(det.get("class", -1)) not in viol_ids:
+                continue
+            candidates.append(det)
+
+        merged = _nms_by_iou(candidates, merge_iou)
+
+        def _cell_key(bbox: List[int]) -> Tuple[int, int]:
+            x1, y1, x2, y2 = bbox
+            cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+            return (cx // cell_px, cy // cell_px)
+
+        cells_this_frame = {_cell_key(d["bbox"]) for d in merged}
+        next_streak: Dict[Tuple[int, int], int] = {}
+        for ck in cells_this_frame:
+            next_streak[ck] = self._helmet_cell_streak.get(ck, 0) + 1
+        self._helmet_cell_streak = next_streak
+
+        pairs: List[Tuple[str, List[int]]] = []
+        reported: set = set()
+        for det in merged:
+            ck = _cell_key(det["bbox"])
+            if ck in reported:
+                continue
+            if self._helmet_cell_streak.get(ck, 0) >= min_streak:
+                reported.add(ck)
+                pairs.append((HELMET_VIOLATION_LABEL, list(det["bbox"])))
+
+        return pairs
+
     def check_truck_restriction(self, detections: List[dict], now: datetime) -> List[str]:
         """
         Flag trucks when current time is inside the configured restricted window.
@@ -526,72 +609,3 @@ class ViolationManager:
             if det["model"] == "truck":
                 violations.append("Truck in restricted hours")
         return violations
-
-    def update_no_parking(
-        self,
-        tracked_objects: Dict[int, Tuple[int, int, int, int]],
-        no_parking_zone: np.ndarray,
-        now: datetime,
-    ) -> List[str]:
-        violations = []
-        active_keys = set()
-
-        for object_id, bbox in tracked_objects.items():
-            x1, y1, x2, y2 = bbox
-            center = ((x1 + x2) // 2, (y1 + y2) // 2)
-            key = ("no_parking", object_id)
-
-            if point_inside_polygon(center, no_parking_zone):
-                active_keys.add(key)
-                if key not in self.zone_entry_times:
-                    self.zone_entry_times[key] = now
-                else:
-                    parked_seconds = (now - self.zone_entry_times[key]).total_seconds()
-                    if parked_seconds >= self.no_parking_threshold_sec:
-                        violations.append(f"No parking violation: ID {object_id}")
-            else:
-                self.zone_entry_times.pop(key, None)
-
-        # Cleanup stale entries (object lost or left zone)
-        for key in list(self.zone_entry_times.keys()):
-            if key[0] == "no_parking" and key not in active_keys:
-                self.zone_entry_times.pop(key, None)
-
-        return violations
-
-    def check_signal_line_violation(
-        self,
-        tracked_objects: Dict[int, Tuple[int, int, int, int]],
-        signal_line_zone: np.ndarray,
-        signal_state: str,
-    ) -> List[str]:
-        violations = []
-        if signal_state != "RED":
-            return violations
-
-        for object_id, bbox in tracked_objects.items():
-            x1, y1, x2, y2 = bbox
-            center = ((x1 + x2) // 2, (y1 + y2) // 2)
-            if point_inside_polygon(center, signal_line_zone):
-                violations.append(f"Signal jump risk (red): ID {object_id}")
-
-        return violations
-
-
-def detect_signal_state(frame: np.ndarray, signal_light_zone: np.ndarray) -> str:
-    """
-    Very simple color-based signal detection.
-    Compares average Red vs Green intensity in signal_light_zone.
-    """
-    mask = np.zeros(frame.shape[:2], dtype=np.uint8)
-    cv2.fillPoly(mask, [signal_light_zone], 255)
-
-    mean_bgr = cv2.mean(frame, mask=mask)[:3]  # (B, G, R)
-    blue, green, red = mean_bgr
-
-    # Small margin to reduce flicker between states.
-    if red > green + 20 and red > blue:
-        return "RED"
-    if green > red + 20 and green > blue:
-        return "GREEN"
-    return "UNKNOWN"

@@ -1,11 +1,14 @@
 """
-Shared full-video decode: YOLO + zones + plate pipeline.
+Shared full-video decode: YOLO + rules + plate pipeline.
 
 Optionally writes an annotated MP4 (FastAPI download). Streamlit can disable that and use snapshots only.
 """
 
 from __future__ import annotations
 
+import json
+import math
+import time
 from pathlib import Path
 from typing import Any, Dict, Generator, List, Optional
 
@@ -15,6 +18,17 @@ import numpy as np
 import config
 from utils.pipeline import TrafficPipeline
 from utils.ui_common import append_plate_capture_from_frame
+
+
+# Suffixes OpenCV / Pillow can load as a single still frame (not a video container).
+_STATIC_IMAGE_SUFFIXES = frozenset(
+    {".jpg", ".jpeg", ".jpe", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+)
+
+
+def is_static_image_path(path: Path) -> bool:
+    """True when ``path`` should be read with ``load_image_bgr``, not ``cv2.VideoCapture``."""
+    return Path(path).suffix.lower() in _STATIC_IMAGE_SUFFIXES
 
 
 def load_image_bgr(path: Path) -> Optional[np.ndarray]:
@@ -36,6 +50,23 @@ def load_image_bgr(path: Path) -> Optional[np.ndarray]:
         return cv2.imread(p)
 
 
+def iter_decode_media(
+    in_path: Path,
+    out_path: Optional[Path],
+    pipeline: TrafficPipeline,
+    *,
+    write_annotated_mp4: bool = True,
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    Decode a video file **or** a single static image (jpg/png/…) with the same event shape.
+    ``cv2.VideoCapture`` is unreliable for still images on some platforms; images use ``iter_decode_image``.
+    """
+    if is_static_image_path(in_path):
+        yield from iter_decode_image(in_path, out_path, pipeline, write_annotated_mp4=write_annotated_mp4)
+    else:
+        yield from iter_decode_video(in_path, out_path, pipeline, write_annotated_mp4=write_annotated_mp4)
+
+
 def iter_decode_video(
     in_path: Path,
     out_path: Optional[Path],
@@ -50,11 +81,18 @@ def iter_decode_video(
     cap = cv2.VideoCapture(str(in_path))
     if not cap.isOpened():
         raise RuntimeError("Could not open video")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 25
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+    # Many phone / screen recordings report 0, 1, or ~2 FPS; that breaks pacing and progress UX.
+    if fps <= 1e-3 or fps > 120.0 or (0 < fps < 5.0):
+        fps = 25.0
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 640
     h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
     src_total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
-    dec_skip = max(1, int(getattr(config, "VIDEO_DECODE_EVERY_N_FRAME", 1)))
+    target_pf = float(getattr(config, "VIDEO_TARGET_PROCESS_FPS", 0.0) or 0.0)
+    if target_pf > 0.0:
+        dec_skip = max(1, int(math.ceil(fps / target_pf)))
+    else:
+        dec_skip = max(1, int(getattr(config, "VIDEO_DECODE_EVERY_N_FRAME", 1)))
     out_fps = max(1.0, fps / dec_skip)
     writer: Optional[cv2.VideoWriter] = None
     if write_annotated_mp4:
@@ -87,7 +125,35 @@ def iter_decode_video(
                 continue
             frame_idx += 1
             orig = frame.copy() if pipeline.use_plate else None
+            # Wall-clock slot for realtime SSE pacing (must be before heavy work).
+            _pace_t0 = time.perf_counter()
+            # region agent log
+            _t_pf0 = _pace_t0
             processed, violations, meta = pipeline.process_frame(frame)
+            _proc_ms = (time.perf_counter() - _t_pf0) * 1000.0
+            if frame_idx <= 25 or frame_idx % 30 == 0:
+                try:
+                    with open("/Users/soham/Desktop/Two/.cursor/debug-53c9b3.log", "a") as _df:
+                        _df.write(
+                            json.dumps(
+                                {
+                                    "sessionId": "53c9b3",
+                                    "timestamp": int(time.time() * 1000),
+                                    "location": "video_decode.py:iter_decode_video",
+                                    "message": "after process_frame",
+                                    "data": {
+                                        "frame_idx": frame_idx,
+                                        "proc_ms": round(_proc_ms, 2),
+                                        "n_viol": len(violations),
+                                    },
+                                    "hypothesisId": "H1",
+                                }
+                            )
+                            + "\n"
+                        )
+                except Exception:
+                    pass
+            # endregion
             cum_viol += len(violations)
             n_before = len(captures)
             if pipeline.use_plate and orig is not None:
@@ -117,6 +183,7 @@ def iter_decode_video(
                 "new_captures": [dict(c) for c in new_captures],
                 "unique_plate_tracks": len({int(c["tid"]) for c in captures}),
                 "plates_locked_count": len(captures),
+                "_pace_t0": _pace_t0,
             }
     finally:
         cap.release()
@@ -173,6 +240,7 @@ def iter_decode_image(
     th_w = int(getattr(config, "DASHBOARD_SIDEBAR_PLATE_THUMB", 132))
 
     orig = frame.copy() if pipeline.use_plate else None
+    _pace_t0 = time.perf_counter()
     processed, violations, meta = pipeline.process_frame(
         frame,
         force_immediate_plate_ocr=True,
@@ -212,6 +280,7 @@ def iter_decode_image(
         "new_captures": [dict(c) for c in new_captures],
         "unique_plate_tracks": len({int(c["tid"]) for c in captures}),
         "plates_locked_count": len(captures),
+        "_pace_t0": _pace_t0,
     }
     yield {
         "kind": "done",

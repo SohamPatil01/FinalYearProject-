@@ -1,4 +1,4 @@
-"""Number plate text extraction with EasyOCR (see ``config`` for preprocessing and Indian-style options)."""
+"""Number plate text extraction on crops (EasyOCR by default; optional PaddleOCR)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+import torch
 
 import config
 
@@ -19,6 +20,8 @@ warnings.filterwarnings(
 )
 
 _reader = None
+_lprnet_reader = None
+_paddle_reader = None
 
 # Alphanumeric plates (India / generic Latin); spaces allowed when ``PLATE_OCR_INDIAN_STYLE``.
 OCR_ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -51,9 +54,224 @@ def get_easyocr_reader(lang_list: Optional[List[str]] = None):
 
 
 def reset_reader() -> None:
-    """Clear cached EasyOCR reader."""
-    global _reader
+    """Clear cached OCR readers."""
+    global _reader, _lprnet_reader, _paddle_reader
     _reader = None
+    _lprnet_reader = None
+    _paddle_reader = None
+
+
+class _LPRSmallBasicBlock(torch.nn.Module):
+    def __init__(self, ch_in: int, ch_out: int):
+        super().__init__()
+        self.block = torch.nn.Sequential(
+            torch.nn.Conv2d(ch_in, ch_out // 4, kernel_size=1),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(ch_out // 4, ch_out // 4, kernel_size=(3, 1), padding=(1, 0)),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(ch_out // 4, ch_out // 4, kernel_size=(1, 3), padding=(0, 1)),
+            torch.nn.ReLU(),
+            torch.nn.Conv2d(ch_out // 4, ch_out, kernel_size=1),
+        )
+
+    def forward(self, x):
+        return self.block(x)
+
+
+class _LPRNet(torch.nn.Module):
+    def __init__(self, class_num: int, lpr_max_len: int = 8, dropout_rate: float = 0.5):
+        super().__init__()
+        self.class_num = int(class_num)
+        self.lpr_max_len = int(lpr_max_len)
+        self.backbone = torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels=3, out_channels=64, kernel_size=3, stride=1),
+            torch.nn.BatchNorm2d(num_features=64),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool3d(kernel_size=(1, 3, 3), stride=(1, 1, 1)),
+            _LPRSmallBasicBlock(ch_in=64, ch_out=128),
+            torch.nn.BatchNorm2d(num_features=128),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool3d(kernel_size=(1, 3, 3), stride=(2, 1, 2)),
+            _LPRSmallBasicBlock(ch_in=64, ch_out=256),
+            torch.nn.BatchNorm2d(num_features=256),
+            torch.nn.ReLU(),
+            _LPRSmallBasicBlock(ch_in=256, ch_out=256),
+            torch.nn.BatchNorm2d(num_features=256),
+            torch.nn.ReLU(),
+            torch.nn.MaxPool3d(kernel_size=(1, 3, 3), stride=(4, 1, 2)),
+            torch.nn.Dropout(dropout_rate),
+            torch.nn.Conv2d(in_channels=64, out_channels=256, kernel_size=(1, 4), stride=1),
+            torch.nn.BatchNorm2d(num_features=256),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(dropout_rate),
+            torch.nn.Conv2d(in_channels=256, out_channels=self.class_num, kernel_size=(13, 1), stride=1),
+            torch.nn.BatchNorm2d(num_features=self.class_num),
+            torch.nn.ReLU(),
+        )
+        self.container = torch.nn.Sequential(
+            torch.nn.Conv2d(in_channels=448 + self.class_num, out_channels=self.class_num, kernel_size=(1, 1)),
+        )
+
+    def forward(self, x):
+        keep_features = []
+        for i, layer in enumerate(self.backbone.children()):
+            x = layer(x)
+            if i in [2, 6, 13, 22]:
+                keep_features.append(x)
+        global_context = []
+        for i, f in enumerate(keep_features):
+            if i in [0, 1]:
+                f = torch.nn.AvgPool2d(kernel_size=5, stride=5)(f)
+            if i in [2]:
+                f = torch.nn.AvgPool2d(kernel_size=(4, 10), stride=(4, 2))(f)
+            f_pow = torch.pow(f, 2)
+            f_mean = torch.mean(f_pow)
+            f = torch.div(f, f_mean)
+            global_context.append(f)
+        x = torch.cat(global_context, 1)
+        x = self.container(x)
+        logits = torch.mean(x, dim=2)
+        return logits
+
+
+def get_lprnet_reader():
+    """Lazy singleton LPRNet reader loaded from ``config.LPRNET_MODEL_PATH``."""
+    global _lprnet_reader
+    if _lprnet_reader is not None:
+        return _lprnet_reader
+    model_path = str(getattr(config, "LPRNET_MODEL_PATH", "") or "")
+    if not model_path:
+        return None
+    if not config.is_model_file_usable(model_path):
+        return None
+    model = None
+    try:
+        model = torch.jit.load(model_path, map_location="cpu")
+    except Exception:
+        pass
+    if model is None:
+        try:
+            loaded = torch.load(model_path, map_location="cpu")
+            if hasattr(loaded, "eval"):
+                model = loaded
+            elif isinstance(loaded, dict):
+                state_dict = None
+                if "state_dict" in loaded and isinstance(loaded["state_dict"], dict):
+                    state_dict = loaded["state_dict"]
+                elif "model" in loaded and isinstance(loaded["model"], dict):
+                    state_dict = loaded["model"]
+                elif all(isinstance(v, torch.Tensor) for v in loaded.values()):
+                    state_dict = loaded
+                if state_dict is not None:
+                    out_w = state_dict.get("container.0.weight")
+                    class_num = int(out_w.shape[0]) if isinstance(out_w, torch.Tensor) else (
+                        len(str(getattr(config, "LPRNET_CHARSET", ""))) + 1
+                    )
+                    net = _LPRNet(class_num=class_num)
+                    net.load_state_dict(state_dict, strict=False)
+                    model = net
+        except Exception:
+            model = None
+    if model is None or not hasattr(model, "eval"):
+        return None
+    model.eval()
+    _lprnet_reader = model
+    return _lprnet_reader
+
+
+def get_paddle_reader():
+    """Lazy singleton PaddleOCR reader."""
+    global _paddle_reader
+    if _paddle_reader is not None:
+        return _paddle_reader
+    try:
+        from paddleocr import PaddleOCR
+    except Exception:
+        return None
+    lang = str(getattr(config, "PADDLEOCR_LANG", "en") or "en")
+    use_gpu = bool(getattr(config, "PADDLEOCR_USE_GPU", False))
+    use_cls = bool(getattr(config, "PADDLEOCR_USE_ANGLE_CLS", True))
+    try:
+        _paddle_reader = PaddleOCR(use_textline_orientation=use_cls, lang=lang, use_gpu=use_gpu)
+    except TypeError:
+        try:
+            _paddle_reader = PaddleOCR(use_angle_cls=use_cls, lang=lang, use_gpu=use_gpu)
+        except TypeError:
+            _paddle_reader = PaddleOCR(use_angle_cls=use_cls, lang=lang)
+    except Exception:
+        return None
+    return _paddle_reader
+
+
+def get_plate_reader(lang_list: Optional[List[str]] = None):
+    """Return configured OCR reader object (EasyOCR by default; PaddleOCR when ``PLATE_OCR_ENGINE`` is paddle)."""
+    engine = str(getattr(config, "PLATE_OCR_ENGINE", "easyocr") or "easyocr").lower()
+    if engine == "paddle":
+        rdr = get_paddle_reader()
+        if rdr is not None:
+            return rdr
+        if bool(getattr(config, "PLATE_OCR_FALLBACK_TO_EASYOCR", True)):
+            return get_easyocr_reader(lang_list)
+        return None
+    return get_easyocr_reader(lang_list)
+
+
+def _ctc_decode_lprnet(logits: torch.Tensor) -> Tuple[str, float]:
+    """
+    Greedy CTC decode for logits shaped [B,C,T] or [B,T,C].
+    Blank index is assumed as the last class.
+    """
+    if logits.ndim != 3:
+        return "", 0.0
+    t = logits.detach().float().cpu()
+    if t.shape[1] > t.shape[2]:
+        # [B, C, T] -> [B, T, C]
+        t = t.permute(0, 2, 1)
+    probs = torch.softmax(t, dim=-1)
+    ids = torch.argmax(probs, dim=-1)[0].tolist()
+    conf_seq = torch.max(probs, dim=-1).values[0].tolist()
+    charset = str(getattr(config, "LPRNET_CHARSET", OCR_ALLOWLIST) or OCR_ALLOWLIST)
+    blank = int(probs.shape[-1] - 1)
+    out_chars: List[str] = []
+    out_confs: List[float] = []
+    prev = None
+    for i, ch_id in enumerate(ids):
+        if ch_id == blank:
+            prev = ch_id
+            continue
+        if prev == ch_id:
+            continue
+        if 0 <= ch_id < len(charset):
+            out_chars.append(charset[ch_id])
+            out_confs.append(float(conf_seq[i]))
+        prev = ch_id
+    if not out_chars:
+        return "", 0.0
+    txt = _normalize_plate_text("".join(out_chars))
+    return txt, float(sum(out_confs) / max(1, len(out_confs)))
+
+
+def _read_plate_lprnet(model: Any, crop_bgr: np.ndarray) -> Tuple[str, float]:
+    """LPRNet inference on a plate crop (BGR) with CTC greedy decode."""
+    if model is None or crop_bgr is None or crop_bgr.size == 0:
+        return "", 0.0
+    work = _upscale_bgr_min_width(crop_bgr)
+    gray = preprocess_plate_bgr(work)
+    if gray is None or gray.size == 0:
+        return "", 0.0
+    iw = int(getattr(config, "LPRNET_INPUT_WIDTH", 94) or 94)
+    ih = int(getattr(config, "LPRNET_INPUT_HEIGHT", 24) or 24)
+    rgb = cv2.cvtColor(gray, cv2.COLOR_GRAY2RGB)
+    rgb = cv2.resize(rgb, (iw, ih), interpolation=cv2.INTER_LINEAR)
+    ten = torch.from_numpy(rgb).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+    ten = (ten - 0.5) / 0.5
+    with torch.no_grad():
+        out = model(ten)
+    if isinstance(out, (tuple, list)) and out:
+        out = out[0]
+    if not isinstance(out, torch.Tensor):
+        return "", 0.0
+    return _ctc_decode_lprnet(out)
 
 
 def _safe_crop(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int, pad_ratio: Optional[float] = None) -> np.ndarray:
@@ -444,16 +662,80 @@ def _read_plate_easyocr(reader: Any, crop_bgr: np.ndarray) -> Tuple[str, float]:
     return _merge_readtext_results(results)
 
 
+def _read_plate_paddle(reader: Any, crop_bgr: np.ndarray) -> Tuple[str, float]:
+    """PaddleOCR on a plate crop. Returns merged text and mean confidence."""
+    if reader is None or crop_bgr is None or crop_bgr.size == 0:
+        return "", 0.0
+    work = _upscale_bgr_min_width(crop_bgr)
+    pad_frac = float(getattr(config, "PLATE_OCR_INNER_PAD_FRAC", 0.0) or 0.0)
+    if pad_frac > 0:
+        work = _inner_pad_crop_bgr(work, pad_frac)
+    best_t, best_c, best_s = "", 0.0, -1.0
+    variants: List[np.ndarray] = [work]
+    if bool(getattr(config, "PLATE_OCR_MULTI_VARIANT", True)):
+        pg = preprocess_plate_bgr(work)
+        if pg is not None and pg.size > 0:
+            variants.append(cv2.cvtColor(pg, cv2.COLOR_GRAY2BGR))
+    for im in variants[:2]:
+        try:
+            raw = reader.ocr(im, cls=bool(getattr(config, "PADDLEOCR_USE_ANGLE_CLS", True)))
+        except TypeError:
+            raw = reader.ocr(im)
+        except Exception:
+            continue
+        cand: List[Tuple[float, str, float]] = []
+        rows = raw if isinstance(raw, list) else []
+        if rows and isinstance(rows[0], list) and len(rows) == 1:
+            rows = rows[0]
+        for r in rows:
+            if not isinstance(r, (list, tuple)) or len(r) < 2:
+                continue
+            box, txtc = r[0], r[1]
+            if not isinstance(txtc, (list, tuple)) or len(txtc) < 2:
+                continue
+            txt = _normalize_plate_text(str(txtc[0]))
+            if not txt:
+                continue
+            conf = float(txtc[1])
+            try:
+                xc = float(np.mean(np.asarray(box)[:, 0]))
+            except Exception:
+                xc = 0.0
+            cand.append((xc, txt, conf))
+        if not cand:
+            continue
+        cand.sort(key=lambda x: x[0])
+        merged = " ".join(c[1] for c in cand) if bool(getattr(config, "PLATE_OCR_INDIAN_STYLE", False)) else "".join(
+            c[1] for c in cand
+        )
+        ocf = float(sum(c[2] for c in cand) / len(cand))
+        score = _ocr_score(merged, ocf)
+        if score > best_s:
+            best_t, best_c, best_s = merged, ocf, score
+    return best_t, best_c
+
+
 def read_plate_from_crop(reader: Any, crop_bgr: np.ndarray) -> Tuple[str, float]:
     """
-    Decode text from a **plate crop only** (BGR region from the YOLO box + optional padding).
+    Decode text from a **number-plate image crop only** (BGR patch from plate YOLO + ``_safe_crop`` padding).
 
-    Never receives the full frame. See ``PLATE_OCR_RECOGNIZER_ONLY`` for recognizer vs detect+read.
-    ``reader`` may be None to lazy-load EasyOCR.
+    Violation models and plate YOLO run on the full frame in the pipeline; this function is the **only**
+    place OCR sees pixels, and it never receives the full frame.
+    ``reader`` may be None to lazy-load the configured OCR engine.
     """
     if crop_bgr is None or crop_bgr.size == 0:
         return "", 0.0
-    return _read_plate_easyocr(reader, crop_bgr)
+    engine = str(getattr(config, "PLATE_OCR_ENGINE", "easyocr") or "easyocr").lower()
+    if engine == "paddle":
+        pr = reader if reader is not None else get_paddle_reader()
+        txt, conf = _read_plate_paddle(pr, crop_bgr)
+        if txt:
+            return txt, conf
+        if bool(getattr(config, "PLATE_OCR_FALLBACK_TO_EASYOCR", True)):
+            eo_reader = get_easyocr_reader()
+            return _read_plate_easyocr(eo_reader, crop_bgr)
+        return "", 0.0
+    return _read_plate_easyocr(reader if reader is not None else get_easyocr_reader(), crop_bgr)
 
 
 def _point_in_bbox(px: float, py: float, bbox: Sequence[int]) -> bool:

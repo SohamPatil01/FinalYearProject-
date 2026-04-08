@@ -27,10 +27,33 @@ from fastapi.templating import Jinja2Templates
 import config
 from utils.pipeline import TrafficPipeline
 from utils.ui_common import paths_from_model_ids
-from utils.video_decode import iter_decode_video
+from utils.video_decode import iter_decode_media
 
 BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+# region agent log
+def _agent_dbg(location: str, message: str, data: Dict[str, Any], hypothesis_id: str) -> None:
+    try:
+        with open("/Users/soham/Desktop/Two/.cursor/debug-53c9b3.log", "a") as df:
+            df.write(
+                json.dumps(
+                    {
+                        "sessionId": "53c9b3",
+                        "timestamp": int(time.time() * 1000),
+                        "location": location,
+                        "message": message,
+                        "data": data,
+                        "hypothesisId": hypothesis_id,
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+
+
+# endregion
 
 app = FastAPI(title="VioLane")
 JOBS: Dict[str, Dict[str, Any]] = {}
@@ -88,12 +111,11 @@ def _build_summary_dict(
             "unique_plate_tracks": unique_tids,
             "frame": n_frames,
             "frame_total": est_decoded,
-            "zones_count": 3,
         },
-        "zones": [
-            {"id": "Z1", "name": "No parking", "key": "no_parking", "violations": 0},
-            {"id": "Z2", "name": "Signal line", "key": "signal_line", "violations": 0},
-            {"id": "Z3", "name": "Signal ROI", "key": "signal_light", "violations": 0},
+        "rules": [
+            {"id": "R1", "name": "Restricted hours (truck)", "key": "truck_restricted"},
+            {"id": "R2", "name": "Triple seat", "key": "triple"},
+            {"id": "R3", "name": "Helmet", "key": "helmet"},
         ],
         "poster": _frame_to_data_uri_jpeg(last_bgr) if last_bgr is not None else "",
         "plates": [
@@ -134,7 +156,7 @@ def _run_full_pass(
 ) -> Tuple[int, int, List[Dict[str, Any]], Optional[np.ndarray], float, int, int]:
     done: Optional[Dict[str, Any]] = None
     last_frame: Optional[Dict[str, Any]] = None
-    for ev in iter_decode_video(in_path, out_path, pipeline):
+    for ev in iter_decode_media(in_path, out_path, pipeline):
         if ev["kind"] == "frame":
             last_frame = ev
         else:
@@ -231,14 +253,18 @@ async def api_run_stream(
             raise HTTPException(status_code=500, detail=f"EasyOCR: {e}") from e
 
     stream_max = int(getattr(config, "WEB_STREAM_PREVIEW_MAX_WIDTH", 960))
+    pace_stream = bool(getattr(config, "WEB_STREAM_REALTIME_PACE", False))
     stream_every = max(1, int(getattr(config, "WEB_STREAM_FRAME_EVERY_N", 1)))
+    if pace_stream:
+        stream_every = 1
 
     def event_gen() -> Generator[bytes, None, None]:
         try:
             yield _sse_pack({"type": "start", "job_id": job_id, "models": sorted(pipeline.active_models)})
             done_ev: Optional[Dict[str, Any]] = None
-            for ev in iter_decode_video(in_path, out_path, pipeline):
+            for ev in iter_decode_media(in_path, out_path, pipeline):
                 if ev["kind"] == "frame":
+                    _fi = int(ev["frame_idx"])
                     for c in ev["new_captures"]:
                         t_sec = round((ev["frame_idx"] * ev["dec_skip"]) / max(ev["fps"], 1e-6), 1)
                         yield _sse_pack(
@@ -279,6 +305,33 @@ async def api_run_stream(
                                 "image": _frame_to_data_uri_jpeg(small, 78),
                             }
                         )
+                    if pace_stream:
+                        fpsv = max(float(ev["fps"]), 1e-6)
+                        dsk = int(ev["dec_skip"])
+                        cap_pf = float(getattr(config, "WEB_PACE_MAX_FPS", 0.0) or 0.0)
+                        eff_fps = min(fpsv, cap_pf) if cap_pf > 0 else fpsv
+                        want_s = dsk / max(eff_fps, 1e-6)
+                        # Deadline from start of frame processing (see video_decode._pace_t0), not post-decode.
+                        pace_t0 = float(ev.get("_pace_t0", time.perf_counter()))
+                        delay = (pace_t0 + want_s) - time.perf_counter()
+                        # region agent log
+                        if _fi <= 25 or _fi % 30 == 0:
+                            _agent_dbg(
+                                "web_app.py:event_gen",
+                                "pace_tick",
+                                {
+                                    "frame_idx": _fi,
+                                    "pace_stream": True,
+                                    "want_s": round(want_s, 4),
+                                    "deadline_sleep_s": round(max(0.0, delay), 4),
+                                    "emitted_jpeg": bool(ev["frame_idx"] % stream_every == 0),
+                                    "runId": "post-fix",
+                                },
+                                "H2",
+                            )
+                        # endregion
+                        if delay > 0:
+                            time.sleep(delay)
                 else:
                     done_ev = ev
 

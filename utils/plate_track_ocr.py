@@ -1,13 +1,15 @@
 """
-Track plate boxes over time and run EasyOCR only when the crop looks stable and readable.
+Track plate boxes from **plate YOLO** and run OCR **only on the plate crop image**
+(``_safe_crop`` → ``read_plate_from_crop``). The full video frame is never sent to OCR.
 
-Avoids OCR on every frame; waits until YOLO confidence, size, aspect ratio, sharpness,
-and motion stability suggest a clear plate view.
+Plate detection and violation YOLOs run in ``TrafficPipeline.process_frame`` before this;
+OCR attempts are gated by quality + stability so we do not OCR blurry or jumping crops every frame.
 """
 
 from __future__ import annotations
 
 import math
+from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import cv2
@@ -114,10 +116,14 @@ class PlateOCRGate:
         stable_need = int(getattr(config, "PLATE_OCR_STABLE_FRAMES", 4))
         drift = float(getattr(config, "PLATE_OCR_MAX_CENTROID_DRIFT", 14.0))
         min_chars = int(getattr(config, "PLATE_OCR_MIN_TEXT_LEN", 4))
-        allow_upgrade = bool(getattr(config, "PLATE_OCR_ALLOW_UPGRADE", True))
+        allow_upgrade = bool(getattr(config, "PLATE_OCR_ALLOW_UPGRADE", False))
         upgrade_ratio = float(getattr(config, "PLATE_OCR_UPGRADE_QUALITY_RATIO", 1.12))
         retry_gap = int(getattr(config, "PLATE_OCR_RETRY_MIN_FRAMES", 6))
+        max_fails = max(1, int(getattr(config, "PLATE_OCR_MAX_TRIES_PER_TRACK", 2)))
+        one_shot = bool(getattr(config, "PLATE_OCR_ONE_SHOT_PER_TRACK", False))
         frame_ocr_budget = max(0, int(getattr(config, "PLATE_OCR_MAX_TRIES_PER_FRAME", 1)))
+        ocr_stride = max(1, int(getattr(config, "PLATE_OCR_ATTEMPT_EVERY_N_FRAMES", 1)))
+        on_ocr_frame = (self._frame_count % ocr_stride) == 0
 
         out: List[dict] = []
 
@@ -131,13 +137,17 @@ class PlateOCRGate:
                     "stable": 0,
                     "last_c": None,
                     "text": "",
+                    "text_hist": [],
                     "ocr_conf": 0.0,
                     "has_ocr": False,
                     "best_quality": 0.0,
                     "ocr_error": False,
+                    "ocr_fail_count": 0,
+                    "ocr_attempted": False,
                     "last_ocr_try_frame": -999,
                     "last_yolo_conf": 0.0,
                     "smooth_bbox": None,
+                    "_gates_ok_prev": False,
                 }
             m = self._meta[tid]
             if smooth_a > 0.0 and smooth_a <= 1.0:
@@ -192,35 +202,63 @@ class PlateOCRGate:
                 and sharp >= min_sharp
                 and m["stable"] >= stable_need
             )
+            prev_gate = bool(m.get("_gates_ok_prev", False))
+            gate_rise = gates_ok and not prev_gate
+            m["_gates_ok_prev"] = gates_ok
+
+            skip_edge = bool(getattr(config, "PLATE_OCR_SKIP_STRIDE_ON_STABLE_EDGE", False))
+            if not m["has_ocr"]:
+                stride_ok = (gate_rise or on_ocr_frame) if skip_edge else on_ocr_frame
+            else:
+                stride_ok = on_ocr_frame
 
             def run_ocr() -> None:
                 try:
                     rdr = reader() if callable(reader) else reader
                     crop = _safe_crop(frame, bbox_i[0], bbox_i[1], bbox_i[2], bbox_i[3])
                     if crop.size == 0:
+                        m["ocr_fail_count"] = int(m.get("ocr_fail_count", 0)) + 1
                         return
                     txt, ocf = read_plate_from_crop(rdr, crop)
                     if txt and len(txt) >= min_chars:
-                        m["text"] = txt
+                        hist_n = max(3, int(getattr(config, "PLATE_TEXT_STABILIZE_WINDOW", 7)))
+                        hist = list(m.get("text_hist", []))
+                        hist.append(str(txt))
+                        if len(hist) > hist_n:
+                            hist = hist[-hist_n:]
+                        m["text_hist"] = hist
+                        m["text"] = Counter(hist).most_common(1)[0][0]
                         m["ocr_conf"] = ocf
                         m["has_ocr"] = True
                         m["best_quality"] = quality
                         m["ocr_error"] = False
+                        m["ocr_fail_count"] = 0
+                    else:
+                        m["ocr_fail_count"] = int(m.get("ocr_fail_count", 0)) + 1
                 except Exception:
                     m["ocr_error"] = True
+                    m["ocr_fail_count"] = int(m.get("ocr_fail_count", 0)) + 1
 
             if not m["has_ocr"]:
+                fail_count = int(m.get("ocr_fail_count", 0))
+                # Exponential retry backoff for failed tracks: retry_gap, 2x, 4x...
+                effective_retry_gap = retry_gap * (2 ** min(fail_count, 2))
                 if (
                     frame_ocr_budget > 0
                     and gates_ok
-                    and (self._frame_count - int(m["last_ocr_try_frame"]) >= retry_gap)
+                    and stride_ok
+                    and (not one_shot or not bool(m.get("ocr_attempted", False)))
+                    and fail_count < max_fails
+                    and (self._frame_count - int(m["last_ocr_try_frame"]) >= effective_retry_gap)
                 ):
                     m["last_ocr_try_frame"] = self._frame_count
+                    m["ocr_attempted"] = True
                     frame_ocr_budget -= 1
                     run_ocr()
             elif allow_upgrade and gates_ok and quality >= float(m["best_quality"]) * upgrade_ratio:
                 if (
                     frame_ocr_budget > 0
+                    and on_ocr_frame
                     and self._frame_count - int(m.get("last_ocr_try_frame", -999)) >= max(3, retry_gap // 2)
                 ):
                     m["last_ocr_try_frame"] = self._frame_count

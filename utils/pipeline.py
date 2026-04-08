@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from collections import deque
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -11,27 +10,24 @@ import cv2
 
 import config
 from utils.detectors import MultiModelDetector, expand_bbox_xyxy
-from utils.plate_ocr import get_easyocr_reader
+from utils.plate_ocr import get_plate_reader
 from utils.plate_track_ocr import PlateOCRGate
 from utils.tracker import CentroidTracker
 from utils.violations import (
+    HELMET_VIOLATION_LABEL,
     TRIPLE_SEAT_VIOLATION_LABEL,
     ViolationManager,
-    detect_signal_state,
     hour_in_half_open_window,
+    infer_helmet_violation_class_ids,
     infer_plate_like_class_ids_from_yolo_names,
     infer_truck_class_allowlist_from_yolo_names,
     infer_triple_class_allowlist_from_yolo_names,
     infer_triple_semantics_from_yolo_names,
 )
-from utils.zones import get_zones
-
 MODEL_DRAW_COLORS: Dict[str, tuple] = {
     "truck": (0, 255, 255),
     "triple": (255, 128, 0),
     "helmet": (255, 0, 255),
-    "signal": (0, 255, 0),
-    "no_parking": (180, 180, 255),
     "plate": (180, 220, 255),
 }
 DEFAULT_DRAW_COLOR = (200, 200, 200)
@@ -114,6 +110,56 @@ def _point_in_bbox(pt: Tuple[int, int], bbox: List[int]) -> bool:
     return x1 <= x <= x2 and y1 <= y <= y2
 
 
+def _bbox_iou(a: List[int], b: List[int]) -> float:
+    ax1, ay1, ax2, ay2 = int(a[0]), int(a[1]), int(a[2]), int(a[3])
+    bx1, by1, bx2, by2 = int(b[0]), int(b[1]), int(b[2]), int(b[3])
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0, ix2 - ix1), max(0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    aa = max(0, ax2 - ax1) * max(0, ay2 - ay1)
+    bb = max(0, bx2 - bx1) * max(0, by2 - by1)
+    den = aa + bb - inter
+    return inter / den if den > 0 else 0.0
+
+
+def _bbox_centroid_dist(a: List[int], b: List[int]) -> float:
+    acx, acy = _bbox_center(a)
+    bcx, bcy = _bbox_center(b)
+    dx = float(acx - bcx)
+    dy = float(acy - bcy)
+    return (dx * dx + dy * dy) ** 0.5
+
+
+def _best_plate_for_bbox(subject_bbox: List[int], plate_reads: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Pick best plate by IoU first, else nearest centroid."""
+    if not plate_reads:
+        return None
+    min_iou = float(getattr(config, "PLATE_VEHICLE_ASSOC_IOU_MIN", 0.08))
+    max_dist = float(getattr(config, "PLATE_VEHICLE_ASSOC_MAX_CENTROID_DIST", 140.0))
+    best_iou = None
+    best_iou_v = 0.0
+    for pr in plate_reads:
+        iou = _bbox_iou(subject_bbox, pr["bbox"])
+        if iou > best_iou_v:
+            best_iou_v = iou
+            best_iou = pr
+    if best_iou is not None and best_iou_v >= min_iou:
+        return best_iou
+    best_dist = None
+    best_pr = None
+    for pr in plate_reads:
+        d = _bbox_centroid_dist(subject_bbox, pr["bbox"])
+        if best_dist is None or d < best_dist:
+            best_dist = d
+            best_pr = pr
+    if best_pr is not None and best_dist is not None and best_dist <= max_dist:
+        return best_pr
+    return None
+
+
 class TrafficPipeline:
     def __init__(
         self,
@@ -141,6 +187,7 @@ class TrafficPipeline:
 
         self.use_truck = "truck" in self.active_models
         self.use_triple = "triple" in self.active_models
+        self.use_helmet = "helmet" in self.active_models
         self.use_plate = config.PLATE_MODEL_KEY in self.active_models
 
         self.truck_viol_start = (
@@ -168,6 +215,23 @@ class TrafficPipeline:
                 if triple_semantics is None and bool(getattr(config, "TRIPLE_AUTO_CLASS_FILTER", True)):
                     triple_allow_from_model = infer_triple_class_allowlist_from_yolo_names(t_names)
 
+        helmet_viol_ids: Optional[Set[int]] = None
+        if self.use_helmet and "helmet" in self.detector.models:
+            cfg_h = getattr(config, "HELMET_VIOLATION_CLASS_IDS", []) or []
+            if len(cfg_h) > 0:
+                helmet_viol_ids = {int(x) for x in cfg_h}
+            else:
+                inferred = infer_helmet_violation_class_ids(
+                    getattr(self.detector.models["helmet"], "names", None)
+                )
+                if inferred:
+                    helmet_viol_ids = inferred
+                else:
+                    print(
+                        "[WARN] Helmet model loaded but no violation classes inferred; "
+                        "set HELMET_VIOLATION_CLASS_IDS in config.py (e.g. [2] for no_helmet)."
+                    )
+
         self._violation_snapshot_seen: Set[Tuple[Any, ...]] = set()
 
         if bool(getattr(config, "TRUCK_RESTRICTED_MATCH_VIOLATION_WINDOW", True)):
@@ -177,13 +241,12 @@ class TrafficPipeline:
             restricted_e = int(getattr(config, "TRUCK_RESTRICTED_END_HOUR", 24))
 
         self.violation_manager = ViolationManager(
-            no_parking_threshold_sec=config.NO_PARKING_TIME_THRESHOLD_SEC,
             truck_restricted_start=restricted_s,
             truck_restricted_end=restricted_e,
             triple_class_allowlist=triple_allow_from_model,
             triple_semantics=triple_semantics,
+            helmet_viol_class_ids=helmet_viol_ids,
         )
-        self.zones = None
         self._ocr_reader = None
         self._plate_gate = PlateOCRGate() if self.use_plate else None
         self._plate_yolo_frame_counter = 0
@@ -243,10 +306,10 @@ class TrafficPipeline:
         return out
 
     def _get_ocr_reader(self):
-        """Lazy EasyOCR reader for plate crops."""
+        """Load EasyOCR weights once. Inference is used only inside ``read_plate_from_crop`` on plate crops, not on ``frame``."""
         if self._ocr_reader is not None:
             return self._ocr_reader
-        self._ocr_reader = get_easyocr_reader(config.EASYOCR_LANGS)
+        self._ocr_reader = get_plate_reader(config.EASYOCR_LANGS)
         return self._ocr_reader
 
     def _now_for_truck_rules(self, reference_time: Optional[datetime] = None) -> datetime:
@@ -290,9 +353,9 @@ class TrafficPipeline:
         self,
         frame_bgr: Any,
         viol_raw: List[str],
-        tracked_objects: Dict[int, Tuple[int, int, int, int]],
         detections_for_rules: List[dict],
         triple_bbox_queue: "deque[List[int]]",
+        helmet_bbox_queue: "deque[List[int]]",
     ) -> List[Dict[str, Any]]:
         """
         One crop per *new* violation incident (deduped by rule + subject).
@@ -305,28 +368,13 @@ class TrafficPipeline:
         )
         ti = 0
         cell_px = max(16, int(getattr(config, "TRIPLE_STREAK_CELL_PX", 72)))
+        helmet_cell_px = max(16, int(getattr(config, "HELMET_STREAK_CELL_PX", 64)))
 
         for msg in viol_raw:
             key: Optional[Tuple[Any, ...]] = None
             bbox: Optional[List[int]] = None
 
-            if msg.startswith("No parking violation:"):
-                m = re.search(r"ID (\d+)", msg)
-                if m:
-                    oid = int(m.group(1))
-                    key = ("no_parking", oid)
-                    t = tracked_objects.get(oid)
-                    if t is not None:
-                        bbox = list(t)
-            elif msg.startswith("Signal jump"):
-                m = re.search(r"ID (\d+)", msg)
-                if m:
-                    oid = int(m.group(1))
-                    key = ("signal_red", oid)
-                    t = tracked_objects.get(oid)
-                    if t is not None:
-                        bbox = list(t)
-            elif msg == "Truck in restricted hours":
+            if msg == "Truck in restricted hours":
                 if ti < len(truck_dets_sorted):
                     bbox = list(truck_dets_sorted[ti]["bbox"])
                     b = bbox
@@ -343,6 +391,11 @@ class TrafficPipeline:
                     bbox = list(triple_bbox_queue.popleft())
                     cx, cy = (bbox[0] + bbox[2]) // 2, (bbox[1] + bbox[3]) // 2
                     key = ("triple", cx // cell_px, cy // cell_px)
+            elif msg == HELMET_VIOLATION_LABEL:
+                if helmet_bbox_queue:
+                    bbox = list(helmet_bbox_queue.popleft())
+                    cx, cy = (bbox[0] + bbox[2]) // 2, (bbox[1] + bbox[3]) // 2
+                    key = ("helmet", cx // helmet_cell_px, cy // helmet_cell_px)
 
             if key is None or bbox is None:
                 continue
@@ -382,9 +435,14 @@ class TrafficPipeline:
         reference_time: Optional[datetime] = None,
         force_full_frame_plate: bool = False,
     ):
-        if self.zones is None:
-            self.zones = get_zones(frame.shape)
+        """
+        One frame through the full stack (sequential, not OCR-in-background):
 
+        1. YOLO violation heads (truck, triple, helmet, …) on ``frame``.
+        2. YOLO plate detector on ``frame`` (or truck ROI), producing plate boxes.
+        3. Violation rules from detections (triple, helmet, truck restricted-time).
+        4. EasyOCR **only** on ``_safe_crop(frame, plate_bbox)`` when the plate gate allows — never on the whole frame.
+        """
         now = self._now_for_truck_rules(reference_time)
         plate_key = config.PLATE_MODEL_KEY
         plate_every = max(1, int(getattr(config, "PLATE_YOLO_EVERY_N_FRAMES", 1)))
@@ -395,7 +453,7 @@ class TrafficPipeline:
         elif self.use_plate:
             self._plate_yolo_frame_counter += 1
 
-        # Plate YOLO runs via `infer_plate` (full frame or truck ROI); main `infer` skips the plate head.
+        # Violation / vehicle YOLO passes (all enabled models except plate).
         detections = self.detector.infer(
             frame,
             skip_models=({plate_key} if self.use_plate else None) or None,
@@ -442,6 +500,9 @@ class TrafficPipeline:
                     truck_boxes,
                     use_truck_roi=use_roi,
                     truck_roi_pad_frac=pad,
+                    include_full_frame_when_roi=bool(
+                        getattr(config, "PLATE_INCLUDE_FULL_FRAME_WITH_TRUCK_ROI", True)
+                    ),
                 )
                 for d in plate_dets:
                     d["bbox_raw"] = [int(x) for x in d["bbox"]]
@@ -452,7 +513,8 @@ class TrafficPipeline:
             plate_dets = []
             other_dets = detections
 
-        # Do not draw or feed rules with plate-class boxes from truck/triple heads when plate.pt is loaded.
+        # Plate localization is universal via plate.pt only; strip plate-like classes from truck/triple
+        # so we do not double-count or run rules on non-plate-head boxes.
         other_dets = self._without_auxiliary_plate_detections(other_dets)
 
         detections_for_rules = other_dets + plate_dets
@@ -542,47 +604,110 @@ class TrafficPipeline:
                 else:
                     pr["near_truck"] = False
 
+        # Associate plate reads with nearest non-plate detections (IoU preferred, else centroid distance).
+        vehicle_like_dets = [d for d in other_dets if d["model"] != plate_key]
+        for pr in plate_reads:
+            best_det = None
+            best_iou = 0.0
+            min_iou = float(getattr(config, "PLATE_VEHICLE_ASSOC_IOU_MIN", 0.08))
+            max_dist = float(getattr(config, "PLATE_VEHICLE_ASSOC_MAX_CENTROID_DIST", 140.0))
+            for d in vehicle_like_dets:
+                iou = _bbox_iou(pr["bbox"], d["bbox"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_det = d
+            if best_det is not None and best_iou >= min_iou:
+                pr["assoc_vehicle_model"] = str(best_det["model"])
+                pr["assoc_vehicle_bbox"] = list(best_det["bbox"])
+                pr["assoc_method"] = "iou"
+                continue
+            nearest = None
+            nearest_d = None
+            for d in vehicle_like_dets:
+                dd = _bbox_centroid_dist(pr["bbox"], d["bbox"])
+                if nearest_d is None or dd < nearest_d:
+                    nearest_d = dd
+                    nearest = d
+            if nearest is not None and nearest_d is not None and nearest_d <= max_dist:
+                pr["assoc_vehicle_model"] = str(nearest["model"])
+                pr["assoc_vehicle_bbox"] = list(nearest["bbox"])
+                pr["assoc_method"] = "centroid"
+
         viol_raw: List[str] = []
         truck_rules_active = False
         truck_tracking_only = False
 
         triple_bbox_queue: deque = deque()
+        t_pairs: List[Tuple[str, List[int]]] = []
         if self.use_triple:
             t_pairs = self.violation_manager.check_triple_riding_pairs(detections_for_rules)
             viol_raw.extend(m for m, _ in t_pairs)
             for _, b in t_pairs:
                 triple_bbox_queue.append(b)
 
+        helmet_bbox_queue: deque = deque()
+        h_pairs: List[Tuple[str, List[int]]] = []
+        if self.use_helmet:
+            h_pairs = self.violation_manager.check_helmet_violation_pairs(detections_for_rules)
+            viol_raw.extend(m for m, _ in h_pairs)
+            for _, b in h_pairs:
+                helmet_bbox_queue.append(b)
+
+        # Helmet(no-helmet) <-> rider association (IoU preferred, else centroid distance).
+        helmet_rider_links: List[Dict[str, Any]] = []
+        if h_pairs:
+            rider_candidates = [
+                d
+                for d in other_dets
+                if d.get("model") == "helmet"
+                and int(d.get("class", -1)) not in set(self.violation_manager.helmet_viol_class_ids)
+            ]
+            hiou = float(getattr(config, "HELMET_RIDER_ASSOC_IOU_MIN", 0.08))
+            hdist = float(getattr(config, "HELMET_RIDER_ASSOC_MAX_CENTROID_DIST", 120.0))
+            for msg, hb in h_pairs:
+                link: Dict[str, Any] = {"message": msg, "helmet_bbox": list(hb)}
+                best = None
+                best_iou = 0.0
+                for rd in rider_candidates:
+                    iou = _bbox_iou(hb, rd["bbox"])
+                    if iou > best_iou:
+                        best_iou = iou
+                        best = rd
+                if best is not None and best_iou >= hiou:
+                    link["rider_bbox"] = list(best["bbox"])
+                    link["method"] = "iou"
+                else:
+                    nearest = None
+                    nearest_d = None
+                    for rd in rider_candidates:
+                        dd = _bbox_centroid_dist(hb, rd["bbox"])
+                        if nearest_d is None or dd < nearest_d:
+                            nearest_d = dd
+                            nearest = rd
+                    if nearest is not None and nearest_d is not None and nearest_d <= hdist:
+                        link["rider_bbox"] = list(nearest["bbox"])
+                        link["method"] = "centroid"
+                helmet_rider_links.append(link)
+
         if self.use_truck:
             truck_rules_active = self.truck_violations_time_active(now)
             truck_tracking_only = not truck_rules_active
 
             if truck_rules_active:
-                signal_state = detect_signal_state(frame, self.zones["signal_light"])
                 viol_raw.extend(self.violation_manager.check_truck_restriction(detections_for_rules, now))
-                viol_raw.extend(
-                    self.violation_manager.update_no_parking(tracked_objects, self.zones["no_parking"], now)
-                )
-                viol_raw.extend(
-                    self.violation_manager.check_signal_line_violation(
-                        tracked_objects,
-                        self.zones["signal_line"],
-                        signal_state,
-                    )
-                )
                 cv2.putText(
                     frame,
-                    f"Signal: {signal_state} | Truck rules: ON",
+                    f"Restricted hours: ON (window {self.truck_viol_start:02d}:00–{self.truck_viol_end:02d}:00)",
                     (20, 28),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.65,
+                    0.58,
                     (0, 255, 100),
                     2,
                 )
             else:
                 cv2.putText(
                     frame,
-                    f"Truck rules: OFF (window {self.truck_viol_start:02d}:00–{self.truck_viol_end:02d}:00) — track + plate only",
+                    f"Restricted hours: OFF (window {self.truck_viol_start:02d}:00–{self.truck_viol_end:02d}:00) — track + plate only",
                     (20, 28),
                     cv2.FONT_HERSHEY_SIMPLEX,
                     0.52,
@@ -600,9 +725,35 @@ class TrafficPipeline:
                 2,
             )
 
-        violations = list(dict.fromkeys(viol_raw))
+        # Attach plate text to each violation when a nearby / overlapping plate is available.
+        violation_lines: List[str] = []
+        truck_sorted = sorted(truck_dets, key=lambda d: float(d["bbox"][0]))
+        ti = 0
+        for msg, bb in t_pairs:
+            best_plate = _best_plate_for_bbox(bb, plate_reads)
+            ptxt = str(best_plate.get("text") or "") if best_plate else ""
+            violation_lines.append(f"{msg} | {ptxt}" if ptxt else msg)
+        for msg, bb in h_pairs:
+            best_plate = _best_plate_for_bbox(bb, plate_reads)
+            ptxt = str(best_plate.get("text") or "") if best_plate else ""
+            violation_lines.append(f"{msg} | {ptxt}" if ptxt else msg)
+        for msg in viol_raw:
+            if msg == "Truck in restricted hours":
+                bb = list(truck_sorted[ti]["bbox"]) if ti < len(truck_sorted) else None
+                ti += 1
+                if bb is None:
+                    violation_lines.append(msg)
+                    continue
+                best_plate = _best_plate_for_bbox(bb, plate_reads)
+                ptxt = str(best_plate.get("text") or "") if best_plate else ""
+                violation_lines.append(f"{msg} | {ptxt}" if ptxt else msg)
+        violations = list(dict.fromkeys(violation_lines if violation_lines else viol_raw))
         violation_snapshots = self._collect_violation_snapshots(
-            frame, viol_raw, tracked_objects, detections_for_rules, triple_bbox_queue
+            frame,
+            viol_raw,
+            detections_for_rules,
+            triple_bbox_queue,
+            helmet_bbox_queue,
         )
 
         y = 52 if self.use_truck else 50
@@ -639,6 +790,7 @@ class TrafficPipeline:
             "plate_infer_mode": plate_infer_mode,
             "plate_yolo_boxes": len(plate_dets),
             "violation_snapshots": violation_snapshots,
+            "helmet_rider_links": helmet_rider_links if self.use_helmet else [],
         }
 
         return frame, violations, meta

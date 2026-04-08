@@ -401,7 +401,7 @@ def viola_header_html(*, status: str = "ready", show_live: bool = False) -> str:
     <div class="viola-logo" aria-hidden="true">🚦</div>
     <div>
       <h1 class="viola-title">Viola Lane</h1>
-      <p class="viola-sub">Traffic analysis · zones · plates · triple seat</p>
+      <p class="viola-sub">Restricted hours · triple seat · helmet · plates</p>
     </div>
   </div>
   <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
@@ -469,11 +469,11 @@ def viola_stats_grid_html(
 def viola_zones_html() -> str:
     return """
 <div class="viola-zones">
-  <h4>ⓘ Zones <span style="font-weight:500;opacity:0.7">(pipeline overlay)</span></h4>
-  <div class="viola-zone-row"><span><span class="viola-dot np"></span>No parking</span><span style="opacity:0.5">●</span></div>
-  <div class="viola-zone-row"><span><span class="viola-dot sl"></span>Signal line</span><span style="opacity:0.5">●</span></div>
-  <div class="viola-zone-row"><span><span class="viola-dot sr"></span>Signal ROI</span><span style="opacity:0.5">●</span></div>
-  <div style="margin-top:0.5rem;font-size:0.68rem;color:#64748b">3 zones active · drawn on preview frames</div>
+  <h4>ⓘ Active rules</h4>
+  <div class="viola-zone-row"><span>Restricted hours (truck)</span><span style="opacity:0.5">●</span></div>
+  <div class="viola-zone-row"><span>Triple seat</span><span style="opacity:0.5">●</span></div>
+  <div class="viola-zone-row"><span>Helmet (no-helmet class)</span><span style="opacity:0.5">●</span></div>
+  <div style="margin-top:0.5rem;font-size:0.68rem;color:#64748b">Detection-based only — no polygon zones</div>
 </div>
 """
 

@@ -4,7 +4,7 @@ VioLane — Streamlit dashboard (primary UI).
 Run: `streamlit run dashboard.py` → http://localhost:8501
 
 Layout matches the former FastAPI/HTML monitor: header, control strip, video + HUD,
-thumb strip, and right column (LIVE STATS · ZONES · RECENT EVENTS).
+thumb strip, and right column (LIVE STATS · RULES · RECENT EVENTS).
 Processing uses `utils/video_decode.py` (same as `web_app.py` if you still run it).
 """
 
@@ -27,6 +27,7 @@ inject_theme()
 
 with st.sidebar:
     st.markdown("## VioLane")
+    st.caption("Step 1: pick detectors · step 2: upload — only selected weights load.")
     st.caption("Catalog & model paths")
     st.caption(
         f"Plate checkpoint: `{config.PLATE_MODEL_PATH.split('/')[-1]}` · "

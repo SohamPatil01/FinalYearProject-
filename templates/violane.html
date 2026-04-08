@@ -161,6 +161,55 @@
     .models-inline label.has { color: var(--text); }
     .models-inline input { accent-color: var(--teal); }
     .models-inline label.disabled { opacity: 0.4; pointer-events: none; }
+    .model-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(148px, 1fr));
+      gap: 0.55rem;
+    }
+    .model-box {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.2rem;
+      margin: 0;
+      padding: 0.65rem 0.75rem;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      background: var(--bg-panel);
+      cursor: pointer;
+      transition: border-color 0.15s, background 0.15s;
+      font-family: var(--font);
+    }
+    .model-box:hover {
+      border-color: rgba(57, 255, 180, 0.35);
+    }
+    .model-box:has(input:checked) {
+      border-color: rgba(57, 255, 180, 0.5);
+      background: rgba(57, 255, 180, 0.07);
+    }
+    .model-box.disabled {
+      opacity: 0.42;
+      pointer-events: none;
+      cursor: not-allowed;
+    }
+    .model-box input[type="checkbox"] {
+      accent-color: var(--teal);
+      width: 1rem;
+      height: 1rem;
+      margin: 0 0 0.25rem 0;
+    }
+    .model-box .model-box-title {
+      font-weight: 600;
+      font-size: 0.84rem;
+      color: var(--text);
+      line-height: 1.25;
+    }
+    .model-box .model-box-id {
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      color: var(--muted);
+      letter-spacing: 0.04em;
+    }
     .truck-mini {
       display: inline-flex;
       align-items: center;
@@ -342,6 +391,41 @@
     }
     .dl-row a:hover { text-decoration: underline; }
 
+    .screen-panel {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--bg-card);
+      padding: 1rem 1.1rem;
+      margin-bottom: 0.75rem;
+    }
+    .screen-panel h2 {
+      margin: 0 0 0.35rem;
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--teal);
+    }
+    .screen-panel .sub {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin: 0 0 0.75rem;
+    }
+    .selected-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin: 0.5rem 0;
+      min-height: 1.5rem;
+    }
+    .selected-chips .chip {
+      font-family: var(--mono);
+      font-size: 0.68rem;
+      padding: 0.2rem 0.5rem;
+      border-radius: 6px;
+      background: var(--bg-panel);
+      border: 1px solid rgba(57, 255, 180, 0.25);
+      color: var(--teal);
+    }
+
     .thumb-strip {
       display: flex;
       gap: 0.5rem;
@@ -366,7 +450,7 @@
   <header class="app-header">
     <div>
       <h1>VioLane</h1>
-      <p class="tagline">Upload a clip for YOLO + zone rules + plate OCR. Annotated video and read log — same pipeline as the Python app.</p>
+      <p class="tagline">Upload a clip for YOLO + rule checks (restricted hours, triple seat, helmet) + plate OCR. Same pipeline as the Python app.</p>
     </div>
     <div class="badges">
       <span class="badge">YOLO</span>
@@ -378,30 +462,45 @@
 
   <div class="layout">
     <main class="main-col">
-      <div class="control-strip">
-        <p class="hint">Select models, upload a clip, <strong>Run analysis</strong> — the main panel updates <strong>live</strong> with YOLO boxes, zones, violations, and plate tracks/OCR as each frame is processed.</p>
-        <input type="file" id="video" class="file-input" accept="video/mp4,video/quicktime,.mp4,.mov,.avi,.mkv" />
-        <button type="button" class="btn btn-teal" id="pick-file">Choose video</button>
-        <span id="file-label" style="font-size:0.78rem;color:var(--muted)">No file</span>
-        <button type="button" class="btn btn-run" id="run">Run analysis</button>
-        <div class="models-inline" id="model-boxes">Loading models…</div>
-        <div class="truck-mini">
-          truck window
-          <input type="number" id="truck_s" min="0" max="23" value="6" title="start hour" />
-          –
-          <input type="number" id="truck_e" min="1" max="24" value="22" title="end hour exclusive" />
+      <div class="screen-panel" id="screen-models">
+        <h2>1 · Select models</h2>
+        <p class="sub">Click one or more boxes to select detectors (multiple selection). Only checked weights load. Then continue to upload.</p>
+        <div id="model-boxes">Loading models…</div>
+        <div style="margin-top:0.75rem">
+          <button type="button" class="btn btn-primary" id="btn-continue-upload">Continue to upload →</button>
+        </div>
+      </div>
+
+      <div class="screen-panel" id="screen-upload" style="display:none">
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:0.75rem;margin-bottom:0.5rem">
+          <button type="button" class="btn btn-ghost" id="btn-back-models">← Change models</button>
+          <span style="font-size:0.78rem;color:var(--muted)">Selected:</span>
+          <div class="selected-chips" id="selected-chips"></div>
+        </div>
+        <div class="control-strip">
+          <p class="hint"><strong>2 · Upload & run</strong> — the preview shows each <strong>annotated</strong> frame. With server real-time pacing, frames arrive at about the video’s FPS.</p>
+          <input type="file" id="video" class="file-input" accept="video/mp4,video/quicktime,.mp4,.mov,.avi,.mkv,image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp,.bmp" />
+          <button type="button" class="btn btn-teal" id="pick-file">Choose file</button>
+          <span id="file-label" style="font-size:0.78rem;color:var(--muted)">No file</span>
+          <button type="button" class="btn btn-run" id="run">Run analysis</button>
+          <div class="truck-mini">
+            truck window
+            <input type="number" id="truck_s" min="0" max="23" value="6" title="start hour" />
+            –
+            <input type="number" id="truck_e" min="1" max="24" value="22" title="end hour exclusive" />
+          </div>
         </div>
       </div>
 
       <div class="video-shell" id="video-shell">
-        <div class="placeholder" id="ph-main">Output preview appears here when you run.<br /><span style="font-size:0.8em;opacity:0.8">Annotated frames stream <strong>live</strong> during processing.</span></div>
+        <div class="placeholder" id="ph-main">Output preview appears here when you run.<br /><span style="font-size:0.8em;opacity:0.8">Annotated frames stream in <strong>real time</strong> (violations on-frame, paced to source FPS when enabled in config).</span></div>
         <img class="live-frame" id="live-frame" alt="" style="display:none" />
         <img class="poster" id="poster" alt="" style="display:none" />
         <video id="player" controls playsinline style="display:none"></video>
         <div class="hud" id="hud" style="display:none">
           FRAME <strong id="hud-frame">0</strong> / <span class="hl" id="hud-total">0</span><br />
-          FPS <span class="hl" id="hud-fps">—</span> · ZONES <strong id="hud-zones">3</strong><br />
-          VIOLATIONS <strong id="hud-viol" style="color:var(--teal)">0</strong> · TRACKED <span class="hl" id="hud-track">0</span>
+          FPS <span class="hl" id="hud-fps">—</span><br />
+          VIOLATIONS <strong id="hud-viol" style="color:var(--teal)">0</strong> · PLATE READS <span class="hl" id="hud-track">0</span>
         </div>
       </div>
 
@@ -424,7 +523,6 @@
         </div>
         <div class="stat-sub"><span>THIS FRAME · VIOLATIONS</span><span class="hl" id="st-frame-viol">0</span></div>
         <div class="stat-sub"><span>FRAME</span><span class="hl" id="st-frame">0 / 0</span></div>
-        <div class="stat-sub"><span>ZONES</span><span class="hl" id="st-zones">3</span></div>
         <div class="speed-slider">
           <label>Playback speed (preview player)</label>
           <input type="range" id="playback-speed" min="0.25" max="2" step="0.25" value="1" />
@@ -432,11 +530,11 @@
       </div>
 
       <div class="card">
-        <h3>ZONES</h3>
-        <ul class="zone-list" id="zone-list">
-          <li><span class="zname">No parking</span><span class="zcount">0</span><span class="zdel">×</span></li>
-          <li><span class="zname">Signal line</span><span class="zcount">0</span><span class="zdel">×</span></li>
-          <li><span class="zname">Signal ROI</span><span class="zcount">0</span><span class="zdel">×</span></li>
+        <h3>RULES</h3>
+        <ul class="zone-list" id="rule-list">
+          <li><span class="zname">Restricted hours (truck)</span></li>
+          <li><span class="zname">Triple seat</span></li>
+          <li><span class="zname">Helmet</span></li>
         </ul>
       </div>
 
@@ -453,6 +551,12 @@
     const $ = (id) => document.getElementById(id);
     const toast = $('toast');
     const modelBoxes = $('model-boxes');
+    const screenModels = $('screen-models');
+    const screenUpload = $('screen-upload');
+    const selectedChips = $('selected-chips');
+    const btnContinue = $('btn-continue-upload');
+    const btnBackModels = $('btn-back-models');
+    let selectedModelIds = [];
     const player = $('player');
     const poster = $('poster');
     const liveFrame = $('live-frame');
@@ -474,14 +578,60 @@
       const r = await fetch('/api/catalog');
       const data = await r.json();
       modelBoxes.innerHTML = '';
+      const grid = document.createElement('div');
+      grid.className = 'model-grid';
       for (const m of data.models) {
         const lab = document.createElement('label');
-        lab.className = m.ready ? 'has' : 'disabled';
-        lab.innerHTML = `<input type="checkbox" name="model" value="${m.id}" ${m.ready ? '' : 'disabled'} />${m.title}`;
-        modelBoxes.appendChild(lab);
+        lab.className = 'model-box' + (m.ready ? '' : ' disabled');
+        const inp = document.createElement('input');
+        inp.type = 'checkbox';
+        inp.name = 'model';
+        inp.value = m.id;
+        if (!m.ready) inp.disabled = true;
+        const title = document.createElement('span');
+        title.className = 'model-box-title';
+        title.textContent = m.title;
+        const idSpan = document.createElement('span');
+        idSpan.className = 'model-box-id';
+        idSpan.textContent = m.id;
+        lab.appendChild(inp);
+        lab.appendChild(title);
+        lab.appendChild(idSpan);
+        grid.appendChild(lab);
       }
+      modelBoxes.appendChild(grid);
     }
     loadCatalog().catch(() => { modelBoxes.textContent = 'Could not load models'; });
+
+    function renderSelectedChips(ids) {
+      selectedChips.innerHTML = '';
+      ids.forEach((id) => {
+        const s = document.createElement('span');
+        s.className = 'chip';
+        s.textContent = id;
+        selectedChips.appendChild(s);
+      });
+    }
+
+    btnContinue.addEventListener('click', () => {
+      const checked = [...document.querySelectorAll('#model-boxes input[name="model"]:checked')].map((x) => x.value);
+      if (!checked.length) {
+        showToast('Select at least one model, then continue.', 'err');
+        return;
+      }
+      selectedModelIds = checked;
+      renderSelectedChips(selectedModelIds);
+      screenModels.style.display = 'none';
+      screenUpload.style.display = 'block';
+    });
+
+    btnBackModels.addEventListener('click', () => {
+      screenUpload.style.display = 'none';
+      screenModels.style.display = 'block';
+      document.querySelectorAll('#model-boxes input[name="model"]').forEach((inp) => {
+        inp.checked = selectedModelIds.includes(inp.value);
+      });
+    });
 
     function showToast(html, cls) {
       toast.innerHTML = html;
@@ -521,28 +671,30 @@
       $('st-viol').textContent = st.violations ?? data.violation_events ?? 0;
       $('st-track').textContent = st.plates_locked ?? (data.plates || []).length;
       $('st-frame').textContent = (st.frame || 0) + ' / ' + (st.frame_total || st.frame || 0);
-      $('st-zones').textContent = st.zones_count ?? 3;
       $('hud-frame').textContent = st.frame || 0;
       $('hud-total').textContent = st.frame_total || st.frame || 0;
       $('hud-fps').textContent = (data.fps != null) ? Number(data.fps).toFixed(1) : '—';
-      $('hud-zones').textContent = st.zones_count ?? 3;
       $('hud-viol').textContent = st.violations ?? data.violation_events ?? 0;
       $('hud-track').textContent = st.unique_plate_tracks ?? st.plates_locked ?? 0;
-      const zl = $('zone-list');
-      zl.innerHTML = '';
-      (data.zones || []).forEach((z) => {
-        const li = document.createElement('li');
-        li.innerHTML = `<span class="zname">${escapeHtml(z.name)}</span><span class="zcount">${z.violations}</span><span class="zdel">×</span>`;
-        zl.appendChild(li);
-      });
+      const rl = $('rule-list');
+      if (rl && Array.isArray(data.rules) && data.rules.length) {
+        rl.innerHTML = '';
+        data.rules.forEach((r) => {
+          const li = document.createElement('li');
+          li.innerHTML = `<span class="zname">${escapeHtml(r.name)}</span>`;
+          rl.appendChild(li);
+        });
+      }
     }
 
     $('run').addEventListener('click', async () => {
       const btn = $('run');
       const v = $('video').files[0];
-      const selected = [...document.querySelectorAll('input[name="model"]:checked')].map((x) => x.value);
+      const selected = selectedModelIds.length
+        ? selectedModelIds
+        : [...document.querySelectorAll('#model-boxes input[name="model"]:checked')].map((x) => x.value);
       resetOutput();
-      if (!selected.length) { showToast('Select at least one model.', 'err'); return; }
+      if (!selected.length) { showToast('Select models on step 1, then Continue to upload.', 'err'); return; }
       if (!v) { showToast('Choose a video file.', 'err'); return; }
 
       const fd = new FormData();

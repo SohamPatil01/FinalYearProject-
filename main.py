@@ -2,7 +2,7 @@
 Traffic Violation Detection — OpenCV runner
 
 Inspired by `New-Truck-Detection/main.py` (restricted-time truck + plate ideas), but wired to
-this repo’s `TrafficPipeline`, `config`, zones, and class filters — same logic as
+this repo’s `TrafficPipeline`, `config`, and class filters — same logic as
 `streamlit run dashboard.py`, without the web UI. Scoped plate search uses the truck ROI
 bottom strip when `TRUCK_PLATE_ROI_BOTTOM_HALF_ONLY` is enabled in `config.py`.
 
@@ -22,12 +22,15 @@ from __future__ import annotations
 import argparse
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Union
 
 import cv2
 
 import config
 from utils.pipeline import TrafficPipeline
+from utils.ui_common import paths_from_model_ids
+from utils.video_decode import is_static_image_path, load_image_bgr
 
 
 def _parse_source(s: str) -> Union[int, str]:
@@ -110,7 +113,7 @@ def _draw_footer_hud(
         window_txt,
     ]
     if meta.get("truck_rules_active"):
-        lines.append("Restricted window: ACTIVE (no-parking / signal / restriction rules apply)")
+        lines.append("Restricted window: ACTIVE (truck restricted-hours rule applies)")
     elif meta.get("truck_tracking_only"):
         lines.append("Restricted window: OFF — tracking + plate only")
     lines.append(f"Violations (this frame): {len(violations)}")
@@ -144,19 +147,55 @@ def main() -> None:
         default=0,
         help="Stop after N frames (0 = until video ends or user quits).",
     )
+    parser.add_argument(
+        "--models",
+        nargs="*",
+        default=None,
+        metavar="ID",
+        help=(
+            "YOLO heads to load (catalog ids: truck, triple, helmet, plate). "
+            "If omitted, loads all paths in config.MODEL_PATHS plus plate when available."
+        ),
+    )
     args = parser.parse_args()
 
     src = _parse_source(args.source)
-    cap = cv2.VideoCapture(src)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video source {src!r}. Check path or camera index.")
-
-    pipeline = TrafficPipeline()
+    if args.models:
+        paths = paths_from_model_ids([str(x).strip() for x in args.models if str(x).strip()])
+        if not paths:
+            raise SystemExit("No usable .pt files for --models (check models/ and catalog ids).")
+        pipeline = TrafficPipeline(model_paths=paths)
+    else:
+        pipeline = TrafficPipeline()
     window = getattr(config, "WINDOW_NAME", "Traffic Violation Detection")
 
     prev_t = time.perf_counter()
     fps_smooth = 0.0
     n = 0
+
+    # Still images: VideoCapture is unreliable; load with Pillow/OpenCV imread path.
+    if isinstance(src, str) and is_static_image_path(Path(src)):
+        frame = load_image_bgr(Path(src))
+        if frame is None or frame.size == 0:
+            raise RuntimeError(f"Could not read image {src!r}")
+        frame = _maybe_resize(frame, args.max_width)
+        frame, violations, meta = pipeline.process_frame(
+            frame,
+            force_immediate_plate_ocr=True,
+            force_full_frame_plate=True,
+        )
+        now_t = time.perf_counter()
+        dt = max(now_t - prev_t, 1e-6)
+        fps_smooth = 1.0 / dt
+        _draw_footer_hud(frame, fps=fps_smooth, meta=meta, violations=violations)
+        cv2.imshow(window, frame)
+        cv2.waitKey(0)
+        cv2.destroyAllWindows()
+        return
+
+    cap = cv2.VideoCapture(src)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video source {src!r}. Check path or camera index.")
 
     while True:
         ret, frame = cap.read()

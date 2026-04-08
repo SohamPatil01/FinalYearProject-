@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Set, Tuple
 import cv2
 
 import config
+from utils.plate_ocr import _safe_crop
 
 
 def model_options() -> Tuple[List[str], List[str], Dict[str, str]]:
@@ -25,12 +26,8 @@ def model_options() -> Tuple[List[str], List[str], Dict[str, str]]:
         lab = f"{entry['title']} ({mid})"
         labels.append(lab)
         label_to_id[lab] = mid
-        if mid in ("truck", "triple", "plate"):
-            defaults.append(lab)
 
-    if not defaults and labels:
-        defaults = labels[: min(3, len(labels))]
-
+    # No detectors on by default — user picks models on the first screen, then uploads.
     return labels, defaults, label_to_id
 
 
@@ -112,7 +109,8 @@ def append_plate_capture_from_frame(
         x2, y2 = min(w, x2), min(h, y2)
         if x2 <= x1 or y2 <= y1:
             continue
-        crop = frame_bgr[y1:y2, x1:x2]
+        # Same padded crop as EasyOCR uses in ``read_plate_from_crop`` (``_safe_crop``).
+        crop = _safe_crop(frame_bgr, x1, y1, x2, y2)
         if crop.size == 0:
             continue
         crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)

@@ -1,4 +1,4 @@
-"""Shared Streamlit UI — Viola Lane glass layout (upload · models · live stats · zones)."""
+"""Shared Streamlit UI — Viola Lane glass layout (upload · models · live stats · rules)."""
 
 from __future__ import annotations
 
@@ -30,7 +30,15 @@ from utils.ui_common import (
     resize_preview_rgb,
     write_upload_to_temp,
 )
-from utils.video_decode import iter_decode_image, iter_decode_video
+from utils.video_decode import iter_decode_media
+
+
+def _streamlit_video_format(filename: str) -> str:
+    """MIME type for ``st.video(..., format=…)`` (browser playback)."""
+    ext = Path(filename).suffix.lower()
+    if ext == ".webm":
+        return "video/webm"
+    return "video/mp4"
 
 
 def _is_upload_image(filename: str) -> bool:
@@ -161,7 +169,6 @@ def _viola_frame_html(
     fi: int,
     ft: int,
     fps: float,
-    zones: int,
     viol: int,
     tracked: int,
 ) -> str:
@@ -170,8 +177,8 @@ def _viola_frame_html(
   <img src="{data_uri}" alt="frame" />
   <div class="viola-hud">
     FRAME <strong>{int(fi)}</strong> / <span style="color:#38bdf8">{int(ft)}</span><br/>
-    FPS <span style="color:#38bdf8">{fps:.1f}</span> · ZONES <strong>{int(zones)}</strong><br/>
-    VIOLATIONS <strong style="color:#f87171">{int(viol)}</strong> · TRACKED <span style="color:#38bdf8">{int(tracked)}</span>
+    FPS <span style="color:#38bdf8">{fps:.1f}</span><br/>
+    VIOLATIONS <strong style="color:#f87171">{int(viol)}</strong> · PLATE READS <span style="color:#38bdf8">{int(tracked)}</span>
   </div>
 </div>
 """
@@ -214,6 +221,19 @@ def _selected_labels_from_toggles(labels: List[str], label_to_id: Dict[str, str]
         if mid and st.session_state.get(_vl_model_key(mid), False):
             out.append(lab)
     return out
+
+
+def _sync_model_toggles_from_labels(
+    labels: List[str],
+    label_to_id: Dict[str, str],
+    selected_labels: List[str],
+) -> None:
+    """Set checkbox keys from a saved list (widgets are not mounted on step 2, so keys would otherwise be dropped)."""
+    sel_set = set(selected_labels)
+    for lab in labels:
+        mid = label_to_id.get(lab)
+        if mid:
+            st.session_state[_vl_model_key(mid)] = lab in sel_set
 
 
 def _refresh_evidence_strips(
@@ -276,7 +296,8 @@ def render_sidebar_catalog() -> None:
         f"Plate weights: `{Path(config.PLATE_MODEL_PATH).name}` · "
         f"Truck-scoped plate YOLO: **{'on' if config.TRUCK_SCOPED_PLATE_ONLY else 'off'}** · "
         f"plate YOLO every **{pe}** frame(s) · bbox expand **{bx:.0%}** · inner YOLO box: **{'on' if inner else 'off'}** · "
-        f"OCR upgrade: **{getattr(config, 'PLATE_OCR_ALLOW_UPGRADE', False)}**"
+        f"OCR upgrade: **{getattr(config, 'PLATE_OCR_ALLOW_UPGRADE', False)}** · "
+        f"OCR attempt every **{getattr(config, 'PLATE_OCR_ATTEMPT_EVERY_N_FRAMES', 1)}** frame(s)"
     )
     with st.expander("Model files", expanded=False):
         for entry in config.MODEL_CATALOG:
@@ -297,12 +318,93 @@ def render_video_tab(
     plate_strip_w = min(120, int(getattr(config, "DASHBOARD_SIDEBAR_PLATE_THUMB", 132)))
     ui_cfg = max(1, int(getattr(config, "DASHBOARD_UI_UPDATE_EVERY_N", 2)))
 
+    if not labels:
+        st.error("No usable `.pt` files found. Add weights under `models/`.")
+        return
+
+    step_models_ok = bool(st.session_state.get("vl_models_step_ok", False))
     header_slot = st.empty()
+
+    if not step_models_ok:
+        header_slot.markdown(
+            viola_header_html(status="ready", show_live=False),
+            unsafe_allow_html=True,
+        )
+        c1s, c2s = st.columns([2, 3])
+        with c1s:
+            with st.container(border=True):
+                st.markdown("### 1 · Select models")
+                st.caption(
+                    "Only checked detectors are **loaded** when you run. Continue to upload a video or photo."
+                )
+                _ensure_model_toggle_defaults(labels, label_to_id, default_labels)
+                # Only when returning from step 2 — otherwise every rerun would reset edits to vl_selected_labels.
+                if bool(st.session_state.pop("vl_resync_toggles_once", False)):
+                    saved = st.session_state.get("vl_selected_labels")
+                    if isinstance(saved, list) and saved:
+                        _sync_model_toggles_from_labels(labels, label_to_id, [str(x) for x in saved])
+                st.markdown("**Detectors**")
+                st.caption("Click **one or more** boxes to enable models (multiple selection).")
+                ncols = 2
+                for row0 in range(0, len(labels), ncols):
+                    row_cols = st.columns(ncols)
+                    for j in range(ncols):
+                        idx = row0 + j
+                        if idx >= len(labels):
+                            continue
+                        lab = labels[idx]
+                        mid = label_to_id[lab]
+                        k = _vl_model_key(mid)
+                        if mid == "plate":
+                            disp = f"{lab} · OCR"
+                            h = "YOLO plate weights + EasyOCR on crops."
+                        elif mid == "triple":
+                            disp = lab
+                            h = "Triple riding — flags 3+ person boxes on one vehicle."
+                        elif mid == "helmet":
+                            disp = lab
+                            h = "No-helmet class (e.g. no_helmet) → violation; other classes for context."
+                        else:
+                            disp = lab
+                            h = f"Use `{mid}` weights in the pipeline."
+                        with row_cols[j]:
+                            with st.container(border=True):
+                                st.checkbox(disp, key=k, help=h)
+                if st.button(
+                    "Continue to upload →",
+                    type="primary",
+                    use_container_width=True,
+                    key="vl_step_continue",
+                ):
+                    sel1 = _selected_labels_from_toggles(labels, label_to_id)
+                    if not sel1:
+                        st.warning("Turn on at least one model to continue.")
+                    else:
+                        st.session_state["vl_selected_labels"] = sel1
+                        st.session_state.vl_models_step_ok = True
+                        st.rerun()
+        with c2s:
+            st.info(
+                "**Step 2** — upload media and run. Unchecked models stay **unloaded** (faster startup, less VRAM)."
+            )
+        return
 
     col_left, col_right = st.columns([2, 3])
 
     with col_left:
         with st.container(border=True):
+            bc1, _ = st.columns([1, 2])
+            with bc1:
+                if st.button("← Change models", key="vl_back_models"):
+                    st.session_state.vl_models_step_ok = False
+                    st.session_state["vl_resync_toggles_once"] = True
+                    st.rerun()
+            # Persisted list — toggle widget keys are cleared while step 2 is shown (widgets unmounted).
+            selected = list(st.session_state.get("vl_selected_labels") or [])
+            if not selected:
+                selected = _selected_labels_from_toggles(labels, label_to_id)
+            st.caption("**Active models:** " + (", ".join(selected) if selected else "— go back to step 1"))
+            st.markdown("### 2 · Upload & run")
             st.markdown(viola_upload_shell_html(), unsafe_allow_html=True)
             uploaded = st.file_uploader(
                 "Video or photo",
@@ -326,26 +428,8 @@ def render_video_tab(
                     if hasattr(st, "toast"):
                         st.toast(f"Uploaded {uploaded.name}", icon="✅")
 
-            _ensure_model_toggle_defaults(labels, label_to_id, default_labels)
-            st.markdown("**Models**")
-            st.caption("Click each toggle to activate or deactivate that detector for the next run.")
-            for lab in labels:
-                mid = label_to_id[lab]
-                k = _vl_model_key(mid)
-                if mid == "plate":
-                    disp = f"{lab} · OCR"
-                    h = "YOLO plate weights + EasyOCR on crops."
-                elif mid == "triple":
-                    disp = lab
-                    h = "Triple riding — flags 3+ person boxes on one vehicle."
-                else:
-                    disp = lab
-                    h = f"Use `{mid}` weights in the pipeline."
-                st.toggle(disp, key=k, help=h)
-
             truck_s = config.TRUCK_VIOLATIONS_ACTIVE_START_HOUR
             truck_e = config.TRUCK_VIOLATIONS_ACTIVE_END_HOUR
-            selected = _selected_labels_from_toggles(labels, label_to_id)
             if selected and any(label_to_id.get(x) == "truck" for x in selected):
                 st.caption(
                     "**Truck rules clock** (half-open `[start, end)`) · same window for no-parking, signal line, and restricted-truck alerts."
@@ -364,11 +448,17 @@ def render_video_tab(
                 with tc2:
                     truck_e = st.number_input("End hour (exclusive)", 1, 24, config.TRUCK_VIOLATIONS_ACTIVE_END_HOUR, key="v_tr_e")
 
+            _sync_on = bool(getattr(config, "DASHBOARD_ANNOTATED_REALTIME_SYNC", True))
             pacing = st.selectbox(
                 "Playback pacing",
                 options=["Real-time (match video clock)", "Fast (no sleep)"],
                 index=0 if config.VIDEO_REALTIME_PACING_DEFAULT else 1,
-                help="Real-time sleeps between frames so progress follows wall-clock video time. Fast runs as quickly as CPU allows.",
+                help=(
+                    "With **real-time sync** (config `DASHBOARD_ANNOTATED_REALTIME_SYNC`), video analysis uses "
+                    "annotated frames paced to the file FPS so violations match what you see. "
+                    "Fast skips sleep (finishes sooner; only use if sync is off or you accept desync). "
+                    "Bogus low FPS in some MP4s is clamped for pacing."
+                ),
             )
             realtime = pacing.startswith("Real-time")
 
@@ -381,7 +471,12 @@ def render_video_tab(
                     "Every 5 frames",
                 ],
                 index=1,
-                help="How often stats, plate list, event log, and evidence thumbnails refresh. The main video preview updates every frame.",
+                help="How often stats, plate list, event log, and evidence thumbnails refresh. "
+                + (
+                    "Synced video mode shows the annotated frame as the main view."
+                    if _sync_on
+                    else "Main view may be native `st.video` when sync is off."
+                ),
             )
             if "Every frame" in ui_refresh:
                 ui_every_val = 1
@@ -444,21 +539,14 @@ def render_video_tab(
 
     frame_slot = st.empty()
 
-    if not labels:
-        frame_slot.markdown(_viola_placeholder_html(), unsafe_allow_html=True)
-        st.error("No usable `.pt` files found. Add weights under `models/`.")
-        return
     if uploaded is None:
         frame_slot.markdown(_viola_placeholder_html(), unsafe_allow_html=True)
-        st.info("Upload a **video** or **photo** (JPG, PNG, …), then click **Run analysis**.")
+        st.info("**Step 2:** upload a **video** or **photo** (JPG, PNG, …), then click **Run analysis**.")
         return
     if not selected:
         _show_upload_idle_preview(mini_preview, uploaded)
         frame_slot.markdown(_viola_placeholder_html(), unsafe_allow_html=True)
-        st.warning(
-            "Turn on at least one **model** above (Truck, Triple, or Number plate). "
-            "Otherwise **Run analysis** stays disabled."
-        )
+        st.warning("No models in session — click **← Change models** and select at least one detector.")
         return
     if not run:
         if not _restore_viola_snapshot(frame_slot, mini_preview, stats_panel, prog_ph):
@@ -481,6 +569,7 @@ def render_video_tab(
     paths = paths_from_labels(selected, label_to_id)
     media_path = write_upload_to_temp(uploaded)
     is_image = _is_upload_image(uploaded.name)
+    sync_video = bool(getattr(config, "DASHBOARD_ANNOTATED_REALTIME_SYNC", True)) and not is_image
     out_mp4_path: Optional[Path] = None
     if export_mp4:
         fd, out_mp4_path_str = tempfile.mkstemp(suffix=".mp4")
@@ -514,11 +603,51 @@ def render_video_tab(
     status_slot.success(f"Active: **{', '.join(sorted(pipeline.active_models))}**")
 
     if pipeline.use_plate:
-        with st.spinner("Loading EasyOCR (first time can take a while on CPU)…"):
+        with st.spinner(
+            "Loading plate text recognizer (EasyOCR weights — used **only** on plate crops during analysis, "
+            "not on the full video)…"
+        ):
             try:
                 pipeline._get_ocr_reader()
             except Exception as e:
-                st.warning(f"EasyOCR preload: {e}")
+                st.warning(f"Plate OCR model load: {e}")
+
+    if not is_image:
+        with st.spinner("Warming up YOLO (first inference can be slow)…"):
+            try:
+                pipeline.process_frame(np.zeros((480, 640, 3), dtype=np.uint8))
+            except Exception:
+                pass
+
+    # Sync mode: one annotated stream paced to FPS (violations on-frame). Else: optional native st.video + overlay.
+    st.session_state["_vl_last_wall_s"] = 0.0
+    st.session_state["_vl_pfps"] = 0.0
+    use_fallback_frame_preview = bool(is_image) or sync_video
+    native_video_ok = False
+    if not is_image and not sync_video:
+        try:
+            vb = Path(media_path).read_bytes()
+            if vb:
+                frame_slot.video(vb, format=_streamlit_video_format(uploaded.name))
+                native_video_ok = True
+        except Exception:
+            native_video_ok = False
+        if not native_video_ok:
+            use_fallback_frame_preview = True
+            frame_slot.warning(
+                "Could not embed a native video player — using frame-by-frame preview (can feel choppy)."
+            )
+        else:
+            mini_preview.caption(
+                "Model overlay below (every few frames). The **large player** is your original file — "
+                "it keeps playing while inference runs."
+            )
+    elif sync_video:
+        frame_slot.info(
+            "**Real-time annotated playback** — the large preview below is each decoded frame **with** "
+            "detections and violations drawn on it, shown at about the file’s frame rate (not a player running ahead)."
+        )
+        mini_preview.caption("Frame summary · same moment as main preview →")
 
     st.session_state.vl_plate_captures = []
     st.session_state.vl_violation_captures = []
@@ -526,6 +655,15 @@ def render_video_tab(
     st.session_state.vl_prev_cum_viol = 0
     ui_every = ui_every_val
     gc_every = int(getattr(config, "DASHBOARD_GC_EVERY_N_FRAMES", 0))
+    preview_every = max(1, int(getattr(config, "DASHBOARD_PREVIEW_UPDATE_EVERY_N_FRAMES", 2)))
+    if sync_video:
+        preview_every = 1
+    if is_image:
+        preview_every = 1
+    annotated_every = max(1, int(getattr(config, "DASHBOARD_ANNOTATED_PREVIEW_EVERY_N_FRAMES", 8)))
+    if sync_video:
+        annotated_every = 1
+    ui_tick = max(ui_every, 3) if (not is_image and native_video_ok) else ui_every
 
     done_ev: Optional[Dict[str, Any]] = None
     frame_idx = 0
@@ -533,20 +671,11 @@ def render_video_tab(
     dec_skip = 1
     fps = 25.0
 
-    decode_iter = (
-        iter_decode_image(
-            Path(media_path),
-            out_mp4_path if export_mp4 else None,
-            pipeline,
-            write_annotated_mp4=bool(export_mp4),
-        )
-        if is_image
-        else iter_decode_video(
-            Path(media_path),
-            out_mp4_path if export_mp4 else None,
-            pipeline,
-            write_annotated_mp4=bool(export_mp4),
-        )
+    decode_iter = iter_decode_media(
+        Path(media_path),
+        out_mp4_path if export_mp4 else None,
+        pipeline,
+        write_annotated_mp4=bool(export_mp4),
     )
 
     try:
@@ -560,7 +689,20 @@ def render_video_tab(
             est_total = max(1, int(ev["frame_total_est"]))
             dec_skip = int(ev["dec_skip"])
             fps = float(ev["fps"])
-            frame_interval = dec_skip / max(fps, 1.0)
+            pace_realtime = sync_video or (realtime and not is_image)
+            if pace_realtime and not is_image:
+                raw_fps = max(fps, 1e-6)
+                min_trust = float(getattr(config, "DASHBOARD_PACING_MIN_SOURCE_FPS", 12.0))
+                if raw_fps < min_trust:
+                    pace_fps = float(getattr(config, "DASHBOARD_PACING_ASSUMED_FPS", 25.0))
+                else:
+                    pace_fps = min(raw_fps, 60.0)
+                cap_pf = float(getattr(config, "DASHBOARD_PACING_MAX_FPS", 0.0) or 0.0)
+                if cap_pf > 0:
+                    pace_fps = min(pace_fps, cap_pf)
+                frame_interval = dec_skip / pace_fps
+            else:
+                frame_interval = 0.0
             violations = ev["violations"]
             meta = ev["meta"]
             processed = ev["processed"]
@@ -598,6 +740,15 @@ def render_video_tab(
             while len(st.session_state.vl_violation_captures) > 48:
                 st.session_state.vl_violation_captures.pop(0)
 
+            prev_wall = float(st.session_state.get("_vl_last_wall_s", 0.0))
+            if prev_wall > 0:
+                inst_pf = 1.0 / max(prev_wall, 1e-6)
+                prev_ema = float(st.session_state.get("_vl_pfps", 0.0))
+                ema_pf = inst_pf if prev_ema <= 0 else 0.88 * prev_ema + 0.12 * inst_pf
+                st.session_state["_vl_pfps"] = ema_pf
+            else:
+                ema_pf = 0.0
+
             rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
             uv = list(dict.fromkeys(violations))
             if uv:
@@ -606,27 +757,38 @@ def render_video_tab(
                 while len(st.session_state.vl_run_events) > 50:
                     st.session_state.vl_run_events.pop()
 
-            # Always refresh the main preview + progress every processed frame. Previously the whole
-            # block was gated by "Browser update frequency", so the video appeared to load only every N frames.
-            small_bgr = cv2.cvtColor(resize_preview_rgb(rgb, preview_max), cv2.COLOR_RGB2BGR)
-            uri = _bgr_jpeg_data_uri(small_bgr, 78)
-            if uri:
-                mini_preview.markdown(
-                    f'<div class="viola-mini-preview"><img src="{uri}" alt="current frame"/></div>',
-                    unsafe_allow_html=True,
+            if use_fallback_frame_preview:
+                small_bgr = cv2.cvtColor(resize_preview_rgb(rgb, preview_max), cv2.COLOR_RGB2BGR)
+                uri = _bgr_jpeg_data_uri(small_bgr, 78)
+                show_preview_img = uri and ((frame_idx - 1) % preview_every == 0)
+                if show_preview_img:
+                    frame_slot.markdown(
+                        _viola_frame_html(
+                            uri,
+                            frame_idx,
+                            est_total,
+                            fps,
+                            cum_viol,
+                            ev["unique_plate_tracks"],
+                        ),
+                        unsafe_allow_html=True,
+                    )
+                    if sync_video:
+                        cap_v = " · ".join(uv[:4]) if uv else "no violations this frame"
+                        mini_preview.caption(f"f{frame_idx}/{est_total} · {cap_v}")
+                    else:
+                        mini_preview.markdown(
+                            f'<div class="viola-mini-preview"><img src="{uri}" alt="current frame"/></div>',
+                            unsafe_allow_html=True,
+                        )
+            elif native_video_ok and (frame_idx - 1) % annotated_every == 0:
+                thumb_w = min(preview_max, 520)
+                mini_preview.image(
+                    resize_preview_rgb(rgb, thumb_w),
+                    caption=f"Detection overlay · frame {frame_idx} / ~{est_total}",
+                    use_container_width=True,
                 )
-                frame_slot.markdown(
-                    _viola_frame_html(
-                        uri,
-                        frame_idx,
-                        est_total,
-                        fps,
-                        3,
-                        cum_viol,
-                        ev["unique_plate_tracks"],
-                    ),
-                    unsafe_allow_html=True,
-                )
+
             prog_ph.progress(
                 min(frame_idx / est_total, 1.0),
                 text=(
@@ -636,11 +798,16 @@ def render_video_tab(
                 ),
             )
 
-            do_heavy_ui = ui_every <= 1 or (frame_idx - 1) % ui_every == 0
+            do_heavy_ui = ui_tick <= 1 or (frame_idx - 1) % ui_tick == 0
             if do_heavy_ui:
                 fv = str(len(uv)) if uv else "0"
                 shake = len(uv) > 0
-                fps_line = f"{fps:.1f} · decode every {dec_skip} frame(s)"
+                if ema_pf > 0.05:
+                    fps_line = (
+                        f"source ~{fps:.0f} FPS · pipeline ~{ema_pf:.1f} Hz · decode every {dec_skip} frame(s)"
+                    )
+                else:
+                    fps_line = f"source ~{fps:.0f} FPS · decode every {dec_skip} frame(s)"
                 stats_panel.markdown(
                     viola_stats_grid_html(
                         cum_viol,
@@ -713,9 +880,10 @@ def render_video_tab(
             if gc_every > 0 and frame_idx % gc_every == 0:
                 gc.collect()
 
-            if realtime and not is_image:
+            if pace_realtime and not is_image:
                 elapsed = time.perf_counter() - t0
                 time.sleep(max(0.0, frame_interval - elapsed))
+            st.session_state["_vl_last_wall_s"] = time.perf_counter() - t0
     except Exception as e:
         try:
             os.unlink(media_path)
@@ -766,22 +934,31 @@ def render_video_tab(
         last_small = cv2.cvtColor(resize_preview_rgb(last_rgb, preview_max), cv2.COLOR_RGB2BGR)
         u2 = _bgr_jpeg_data_uri(last_small, 82)
         if u2:
-            mini_preview.markdown(
-                f'<div class="viola-mini-preview"><img src="{u2}" alt="last frame"/></div>',
-                unsafe_allow_html=True,
-            )
-            frame_slot.markdown(
-                _viola_frame_html(
-                    u2,
-                    int(done_ev["frame_idx"]),
-                    int(done_ev["est_decoded"]),
-                    float(done_ev["fps"]),
-                    3,
-                    int(done_ev["cum_viol"]),
-                    len({int(c["tid"]) for c in done_ev["captures"]}),
-                ),
-                unsafe_allow_html=True,
-            )
+            if is_image or sync_video:
+                if not sync_video:
+                    mini_preview.markdown(
+                        f'<div class="viola-mini-preview"><img src="{u2}" alt="last frame"/></div>',
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    mini_preview.caption("Last frame · real-time annotated run complete")
+                frame_slot.markdown(
+                    _viola_frame_html(
+                        u2,
+                        int(done_ev["frame_idx"]),
+                        int(done_ev["est_decoded"]),
+                        float(done_ev["fps"]),
+                        int(done_ev["cum_viol"]),
+                        len({int(c["tid"]) for c in done_ev["captures"]}),
+                    ),
+                    unsafe_allow_html=True,
+                )
+            else:
+                mini_preview.image(
+                    resize_preview_rgb(last_rgb, min(preview_max, 560)),
+                    caption="Last annotated frame · source video still playable above",
+                    use_container_width=True,
+                )
             _persist_viola_snapshot(
                 main_uri=u2,
                 done_ev=done_ev,

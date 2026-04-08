@@ -1,4 +1,8 @@
-"""Detection utilities for running multiple YOLO models."""
+"""Detection utilities for running multiple YOLO models.
+
+Plate boxes used for OCR always come from the dedicated ``plate.pt`` pass (``infer_plate``), not from
+truck, triple, or helmet checkpoints even if those define plate-like classes.
+"""
 
 from __future__ import annotations
 
@@ -138,6 +142,7 @@ class MultiModelDetector:
         *,
         use_truck_roi: bool = False,
         truck_roi_pad_frac: float = 0.15,
+        include_full_frame_when_roi: bool = False,
     ) -> List[dict]:
         """
         Run only the plate YOLO on the full frame, or on crops around each truck box.
@@ -196,6 +201,9 @@ class MultiModelDetector:
             bottom_only = bool(getattr(config, "TRUCK_PLATE_ROI_BOTTOM_HALF_ONLY", False))
             v0 = float(getattr(config, "TRUCK_PLATE_ROI_VERTICAL_START_FRAC", 0.5) or 0.0)
             v0 = max(0.0, min(0.95, v0))
+
+            if include_full_frame_when_roi:
+                collected.extend(_run_on_bgr(frame, 0, 0))
 
             for tb in truck_boxes:
                 x1, y1, x2, y2 = _expand_bbox_xyxy(tb, truck_roi_pad_frac, h, w)
