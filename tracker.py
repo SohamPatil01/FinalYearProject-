@@ -2,49 +2,66 @@ import math
 
 
 class Tracker:
-    def __init__(self):
-        # Store the center positions of the objects
-        self.center_points = {}
-        # Keep the count of the IDs
-        # each time a new object id detected, the count will increase by one
-        self.id_count = 0
+    """
+    Greedy nearest-neighbour association so IDs stay stable under faster motion.
+    `max_match_dist` should be a fair fraction of frame size (e.g. 70–90 px at 1020-wide).
+    """
 
+    def __init__(self, max_match_dist=78):
+        self.center_points = {}
+        self.id_count = 0
+        self.max_match_dist = max_match_dist
 
     def update(self, objects_rect):
-        # Objects boxes and ids
         objects_bbs_ids = []
+        if not objects_rect:
+            self.center_points = {}
+            return objects_bbs_ids
 
-        # Get center point of new object
+        det_centers = []
         for rect in objects_rect:
             x, y, w, h = rect
             cx = (x + x + w) // 2
             cy = (y + y + h) // 2
+            det_centers.append((cx, cy))
 
-            # Find out if that object was detected already
-            same_object_detected = False
-            for id, pt in self.center_points.items():
-                dist = math.hypot(cx - pt[0], cy - pt[1])
+        track_ids = list(self.center_points.keys())
+        pairs = []
+        for di, (dcx, dcy) in enumerate(det_centers):
+            for tid in track_ids:
+                tcx, tcy = self.center_points[tid]
+                dist = math.hypot(dcx - tcx, dcy - tcy)
+                if dist < self.max_match_dist:
+                    pairs.append((dist, di, tid))
 
-                if dist < 35:
-                    self.center_points[id] = (cx, cy)
-#                    print(self.center_points)
-                    objects_bbs_ids.append([x, y, w, h, id])
-                    same_object_detected = True
-                    break
+        pairs.sort(key=lambda t: t[0])
+        assigned_det = set()
+        assigned_tid = set()
 
-            # New object is detected we assign the ID to that object
-            if same_object_detected is False:
-                self.center_points[self.id_count] = (cx, cy)
-                objects_bbs_ids.append([x, y, w, h, self.id_count])
-                self.id_count += 1
+        for dist, di, tid in pairs:
+            if di in assigned_det or tid in assigned_tid:
+                continue
+            assigned_det.add(di)
+            assigned_tid.add(tid)
+            rect = objects_rect[di]
+            x, y, w, h = rect
+            cx, cy = det_centers[di]
+            self.center_points[tid] = (cx, cy)
+            objects_bbs_ids.append([x, y, w, h, tid])
 
-        # Clean the dictionary by center points to remove IDS not used anymore
+        for di, rect in enumerate(objects_rect):
+            if di in assigned_det:
+                continue
+            x, y, w, h = rect
+            cx, cy = det_centers[di]
+            tid = self.id_count
+            self.id_count += 1
+            self.center_points[tid] = (cx, cy)
+            objects_bbs_ids.append([x, y, w, h, tid])
+
         new_center_points = {}
         for obj_bb_id in objects_bbs_ids:
             _, _, _, _, object_id = obj_bb_id
-            center = self.center_points[object_id]
-            new_center_points[object_id] = center
-
-        # Update dictionary with IDs not used removed
-        self.center_points = new_center_points.copy()
+            new_center_points[object_id] = self.center_points[object_id]
+        self.center_points = new_center_points
         return objects_bbs_ids

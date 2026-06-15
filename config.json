@@ -1,0 +1,55 @@
+{
+    "video": {
+        "input_path": "te.mp4",
+        "output_path": "output_video.avi",
+        "output_fps": 20.0,
+        "frame_width": 1020,
+        "frame_height": 600,
+        "skip_frames": 2
+    },
+    "detection": {
+        "model_path": "yolov10s.pt",
+        "confidence_threshold": 0.5,
+        "vehicle_classes": [
+            "car",
+            "truck",
+            "bus",
+            "motorcycle"
+        ],
+        "coco_class_file": "coco.txt"
+    },
+    "tracking": {
+        "distance_threshold": 50,
+        "max_disappeared": 30
+    },
+    "traffic_light": {
+        "temporal_frames": 5,
+        "confidence_threshold": 0.6,
+        "roi_x_max": 915,
+        "light_roi": []
+    },
+    "event_logic": {
+        "cooldown_frames": 80,
+        "crossing_direction": "down",
+        "stop_line": []
+    },
+    "plate_detection": {
+        "enabled": true,
+        "ocr_min_confidence": 0.35,
+        "allowed_pattern": "[A-Z0-9]{6,12}",
+        "vote_window": 8
+    },
+    "roi": {
+        "config_file": "roi_config.json",
+        "use_interactive_selector": true,
+        "default_areas": []
+    },
+    "output": {
+        "save_images": true,
+        "images_directory": "saved_images",
+        "add_timestamp_to_images": true,
+        "show_video_window": true,
+        "log_violations": true,
+        "log_file": "violations.log"
+    }
+}
