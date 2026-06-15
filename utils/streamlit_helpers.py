@@ -54,6 +54,41 @@ def _is_upload_image(filename: str) -> bool:
     )
 
 
+def _vl_cleanup_staged_media() -> None:
+    """Remove temp file from session (upload wizard step 1 → 2 → 3)."""
+    p = st.session_state.pop("vl_staged_media_path", None)
+    if p:
+        try:
+            os.unlink(str(p))
+        except OSError:
+            pass
+    st.session_state.pop("vl_staged_media_name", None)
+
+
+def _show_staged_idle_preview(mini_preview: Any, media_path: str, filename: str) -> None:
+    """Preview staged file on disk before Run (step 3)."""
+    if not media_path or not Path(media_path).is_file():
+        return
+    try:
+        if _is_upload_image(filename):
+            bgr = cv2.imread(media_path)
+            if bgr is not None and bgr.size > 0:
+                rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                mini_preview.image(
+                    rgb,
+                    caption="Staged · click **Run analysis**",
+                    use_container_width=True,
+                )
+                return
+        mini_preview.markdown(
+            f"<p style='color:#94a3b8;margin:0'>Video <strong>{html.escape(filename)}</strong> — click "
+            "<strong>Run analysis</strong></p>",
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        mini_preview.caption(f"{html.escape(filename)} — preview failed; you can still run analysis.")
+
+
 def _show_upload_idle_preview(mini_preview: Any, uploaded: Any) -> None:
     """Show the raw file in the preview column before/without a pipeline run."""
     if uploaded is None:
@@ -322,10 +357,12 @@ def render_video_tab(
         st.error("No usable `.pt` files found. Add weights under `models/`.")
         return
 
-    step_models_ok = bool(st.session_state.get("vl_models_step_ok", False))
+    if "vl_wizard_step" not in st.session_state:
+        st.session_state["vl_wizard_step"] = 3 if st.session_state.get("vl_models_step_ok") else 1
+    wizard = int(st.session_state.get("vl_wizard_step", 1))
     header_slot = st.empty()
 
-    if not step_models_ok:
+    if wizard == 1:
         header_slot.markdown(
             viola_header_html(status="ready", show_live=False),
             unsafe_allow_html=True,
@@ -333,18 +370,55 @@ def render_video_tab(
         c1s, c2s = st.columns([2, 3])
         with c1s:
             with st.container(border=True):
-                st.markdown("### 1 · Select models")
-                st.caption(
-                    "Only checked detectors are **loaded** when you run. Continue to upload a video or photo."
+                st.markdown("### Step 1 · Upload media")
+                st.caption("Add a video or image first. You will choose models next, then run analysis.")
+                up1 = st.file_uploader(
+                    "Video or photo",
+                    type=["mp4", "avi", "mov", "mkv", "jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"],
+                    key="vid_wizard_1",
+                    label_visibility="collapsed",
                 )
+                if up1 is not None:
+                    st.caption(f"**{html.escape(up1.name)}** · {up1.size // 1024} KB")
+                if st.button("Continue → select models", type="primary", use_container_width=True, key="vl_w1_next"):
+                    if up1 is None:
+                        st.warning("Choose a video or image first.")
+                    else:
+                        _vl_cleanup_staged_media()
+                        st.session_state["vl_staged_media_path"] = write_upload_to_temp(up1)
+                        st.session_state["vl_staged_media_name"] = up1.name
+                        st.session_state["vl_wizard_step"] = 2
+                        st.rerun()
+        with c2s:
+            st.info("**Flow:** upload → pick detectors (only those weights load) → configure & **Run analysis**.")
+        return
+
+    if wizard == 2:
+        if not st.session_state.get("vl_staged_media_path"):
+            st.session_state["vl_wizard_step"] = 1
+            st.rerun()
+            return
+        header_slot.markdown(
+            viola_header_html(status="ready", show_live=False),
+            unsafe_allow_html=True,
+        )
+        c1s, c2s = st.columns([2, 3])
+        with c1s:
+            with st.container(border=True):
+                st.markdown("### Step 2 · Select models")
+                fn = st.session_state.get("vl_staged_media_name") or "—"
+                st.caption(f"**File:** `{html.escape(str(fn))}`")
+                if st.button("← Change file", key="vl_w2_back_file"):
+                    _vl_cleanup_staged_media()
+                    st.session_state["vl_wizard_step"] = 1
+                    st.rerun()
                 _ensure_model_toggle_defaults(labels, label_to_id, default_labels)
-                # Only when returning from step 2 — otherwise every rerun would reset edits to vl_selected_labels.
                 if bool(st.session_state.pop("vl_resync_toggles_once", False)):
                     saved = st.session_state.get("vl_selected_labels")
                     if isinstance(saved, list) and saved:
                         _sync_model_toggles_from_labels(labels, label_to_id, [str(x) for x in saved])
                 st.markdown("**Detectors**")
-                st.caption("Click **one or more** boxes to enable models (multiple selection).")
+                st.caption("Enable one or more — multiple selection.")
                 ncols = 2
                 for row0 in range(0, len(labels), ncols):
                     row_cols = st.columns(ncols)
@@ -371,62 +445,50 @@ def render_video_tab(
                             with st.container(border=True):
                                 st.checkbox(disp, key=k, help=h)
                 if st.button(
-                    "Continue to upload →",
+                    "Continue → run",
                     type="primary",
                     use_container_width=True,
-                    key="vl_step_continue",
+                    key="vl_w2_next",
                 ):
                     sel1 = _selected_labels_from_toggles(labels, label_to_id)
                     if not sel1:
                         st.warning("Turn on at least one model to continue.")
                     else:
                         st.session_state["vl_selected_labels"] = sel1
-                        st.session_state.vl_models_step_ok = True
+                        st.session_state["vl_wizard_step"] = 3
                         st.rerun()
         with c2s:
-            st.info(
-                "**Step 2** — upload media and run. Unchecked models stay **unloaded** (faster startup, less VRAM)."
-            )
+            st.info("Only checked models are loaded into memory before processing.")
         return
 
     col_left, col_right = st.columns([2, 3])
 
+    if not st.session_state.get("vl_staged_media_path"):
+        st.session_state["vl_wizard_step"] = 1
+        st.rerun()
+        return
+
     with col_left:
         with st.container(border=True):
-            bc1, _ = st.columns([1, 2])
-            with bc1:
-                if st.button("← Change models", key="vl_back_models"):
-                    st.session_state.vl_models_step_ok = False
+            st.markdown("### Step 3 · Run analysis")
+            fn = st.session_state.get("vl_staged_media_name") or "—"
+            st.caption(f"**Media:** `{html.escape(str(fn))}`")
+            rb = st.columns(2)
+            with rb[0]:
+                if st.button("← Change file", key="vl_w3_back_file"):
+                    _vl_cleanup_staged_media()
+                    st.session_state["vl_wizard_step"] = 1
+                    st.rerun()
+            with rb[1]:
+                if st.button("← Change models", key="vl_w3_back_models"):
+                    st.session_state["vl_wizard_step"] = 2
                     st.session_state["vl_resync_toggles_once"] = True
                     st.rerun()
-            # Persisted list — toggle widget keys are cleared while step 2 is shown (widgets unmounted).
             selected = list(st.session_state.get("vl_selected_labels") or [])
             if not selected:
                 selected = _selected_labels_from_toggles(labels, label_to_id)
-            st.caption("**Active models:** " + (", ".join(selected) if selected else "— go back to step 1"))
-            st.markdown("### 2 · Upload & run")
+            st.caption("**Active models:** " + (", ".join(selected) if selected else "— go back to step 2"))
             st.markdown(viola_upload_shell_html(), unsafe_allow_html=True)
-            uploaded = st.file_uploader(
-                "Video or photo",
-                type=["mp4", "avi", "mov", "mkv", "jpg", "jpeg", "png", "webp", "bmp", "tif", "tiff"],
-                key="vid_up",
-                label_visibility="collapsed",
-            )
-            if uploaded is not None:
-                uid = f"{uploaded.name}:{uploaded.size}"
-                if st.session_state.get("vl_upload_uid") != uid:
-                    st.session_state.vl_upload_uid = uid
-                    st.session_state.viola_ui_status = "ready"
-                    st.session_state.vl_toast_u = None
-                    st.session_state.pop("viola_snapshot", None)
-                    st.session_state.vl_run_events = []
-                    st.session_state.vl_violation_captures = []
-                    st.session_state.vl_plate_captures = []
-                st.caption(f"**{html.escape(uploaded.name)}** · ready to analyze")
-                if st.session_state.get("vl_toast_u") != uid:
-                    st.session_state.vl_toast_u = uid
-                    if hasattr(st, "toast"):
-                        st.toast(f"Uploaded {uploaded.name}", icon="✅")
 
             truck_s = config.TRUCK_VIOLATIONS_ACTIVE_START_HOUR
             truck_e = config.TRUCK_VIOLATIONS_ACTIVE_END_HOUR
@@ -502,7 +564,7 @@ def render_video_tab(
                 type="primary",
                 key="run_vid",
                 use_container_width=True,
-                disabled=(uploaded is None or not selected),
+                disabled=(not st.session_state.get("vl_staged_media_path") or not selected),
             )
 
         status_slot = st.empty()
@@ -539,18 +601,20 @@ def render_video_tab(
 
     frame_slot = st.empty()
 
-    if uploaded is None:
+    staged_path = str(st.session_state.get("vl_staged_media_path") or "")
+    staged_name = str(st.session_state.get("vl_staged_media_name") or "")
+    if not staged_path:
         frame_slot.markdown(_viola_placeholder_html(), unsafe_allow_html=True)
-        st.info("**Step 2:** upload a **video** or **photo** (JPG, PNG, …), then click **Run analysis**.")
+        st.info("Upload a file in **Step 1**, then choose models in **Step 2**.")
         return
     if not selected:
-        _show_upload_idle_preview(mini_preview, uploaded)
+        _show_staged_idle_preview(mini_preview, staged_path, staged_name)
         frame_slot.markdown(_viola_placeholder_html(), unsafe_allow_html=True)
-        st.warning("No models in session — click **← Change models** and select at least one detector.")
+        st.warning("No models in session — use **← Change models** and select at least one detector.")
         return
     if not run:
         if not _restore_viola_snapshot(frame_slot, mini_preview, stats_panel, prog_ph):
-            _show_upload_idle_preview(mini_preview, uploaded)
+            _show_staged_idle_preview(mini_preview, staged_path, staged_name)
             frame_slot.markdown(_viola_placeholder_html(), unsafe_allow_html=True)
         events_panel.markdown(
             viola_events_html(list(st.session_state.get("vl_run_events", []))),
@@ -567,8 +631,8 @@ def render_video_tab(
         return
 
     paths = paths_from_labels(selected, label_to_id)
-    media_path = write_upload_to_temp(uploaded)
-    is_image = _is_upload_image(uploaded.name)
+    media_path = staged_path
+    is_image = _is_upload_image(staged_name)
     sync_video = bool(getattr(config, "DASHBOARD_ANNOTATED_REALTIME_SYNC", True)) and not is_image
     out_mp4_path: Optional[Path] = None
     if export_mp4:
@@ -628,7 +692,7 @@ def render_video_tab(
         try:
             vb = Path(media_path).read_bytes()
             if vb:
-                frame_slot.video(vb, format=_streamlit_video_format(uploaded.name))
+                frame_slot.video(vb, format=_streamlit_video_format(staged_name))
                 native_video_ok = True
         except Exception:
             native_video_ok = False

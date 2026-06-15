@@ -95,6 +95,10 @@ PLATE_BBOX_EXPAND_FRAC: float = 0.12
 PLATE_DRAW_INNER_YOLO_BOX: bool = True
 
 # --- Plate OCR gating (EasyOCR: **only** on plate-image crops; runs when crop quality + stability gates pass) ---
+# If True (recommended): ``PlateOCRGate`` tracks plate boxes over time, waits for stable/sharp crops, then OCR.
+# If False: no tracker — OCR runs on plate YOLO boxes directly (``ocr_plate_detections_one_shot``), throttled by
+# ``PLATE_OCR_ATTEMPT_EVERY_N_FRAMES``. Simpler but heavier CPU, jittery track IDs, and no stability voting.
+PLATE_USE_TRACK_OCR_GATE: bool = True
 PLATE_TRACK_MAX_DISTANCE: int = 95
 PLATE_TRACK_MAX_DISAPPEARED: int = 22
 # EMA on plate box per track (0 = off). Smooths jitter between YOLO refreshes for steadier crops and reads.

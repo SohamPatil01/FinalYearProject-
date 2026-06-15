@@ -27,7 +27,7 @@ inject_theme()
 
 with st.sidebar:
     st.markdown("## VioLane")
-    st.caption("Step 1: pick detectors · step 2: upload — only selected weights load.")
+    st.caption("Flow: upload → pick detectors → run. Only selected weights load.")
     st.caption("Catalog & model paths")
     st.caption(
         f"Plate checkpoint: `{config.PLATE_MODEL_PATH.split('/')[-1]}` · "

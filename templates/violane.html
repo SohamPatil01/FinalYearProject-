@@ -6,23 +6,50 @@
   <title>VioLane — Traffic monitor</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500;600&family=Outfit:wght@500;600;700;800&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg-deep: #06080c;
-      --bg-panel: #0c1018;
-      --bg-card: #111822;
-      --border: rgba(57, 255, 180, 0.12);
-      --text: #e8f0ea;
-      --muted: #6b7f88;
-      --teal: #39ffb4;
-      --teal-dim: rgba(57, 255, 180, 0.15);
-      --red: #ff5c5c;
-      --red-dim: rgba(255, 92, 92, 0.12);
-      --blue-btn: #1e3a5f;
-      --radius: 12px;
-      --font: "Outfit", system-ui, sans-serif;
-      --mono: "JetBrains Mono", ui-monospace, monospace;
+      --bg-deep: #05060a;
+      --bg-panel: #0c0e14;
+      --bg-card: #12151e;
+      --border: rgba(255, 163, 102, 0.14);
+      --text: #eef1f4;
+      --muted: #7a8494;
+      --accent: #ffa366;
+      --accent-dim: rgba(255, 163, 102, 0.12);
+      --teal: #5ee0b8;
+      --teal-dim: rgba(94, 224, 184, 0.12);
+      --red: #ff7a7a;
+      --red-dim: rgba(255, 122, 122, 0.12);
+      --radius: 16px;
+      --radius-sm: 10px;
+      --blue-btn: #1e2d4a;
+      --font: "DM Sans", system-ui, sans-serif;
+      --font-display: "Outfit", var(--font);
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+      --space-section: clamp(1.25rem, 4vw, 2.25rem);
+      --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    @keyframes vlFadeUp {
+      from { opacity: 0; transform: translateY(12px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes vlPulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(255, 163, 102, 0.35); }
+      50% { box-shadow: 0 0 0 10px rgba(255, 163, 102, 0); }
+    }
+    @keyframes vlShimmer {
+      0% { background-position: -200% center; }
+      100% { background-position: 200% center; }
+    }
+    @keyframes vlFloat {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-6px); }
+    }
+    @keyframes vlLiveRing {
+      0% { box-shadow: 0 0 0 0 rgba(94, 224, 184, 0.35); }
+      100% { box-shadow: 0 0 0 14px rgba(94, 224, 184, 0); }
     }
     * { box-sizing: border-box; }
     body {
@@ -426,72 +453,478 @@
       color: var(--teal);
     }
 
+    body.vl-app { position: relative; min-height: 100vh; }
+    .vl-bg-mesh {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background:
+        radial-gradient(ellipse 80% 50% at 15% -15%, rgba(255, 163, 102, 0.1), transparent 52%),
+        radial-gradient(ellipse 55% 45% at 95% 20%, rgba(94, 224, 184, 0.07), transparent 48%),
+        var(--bg-deep);
+    }
+    .vl-shell { position: relative; z-index: 1; max-width: 1160px; margin: 0 auto; padding: 0 1.25rem 2.5rem; }
+    .vl-stepper {
+      display: flex; align-items: center; justify-content: center; gap: 0.35rem;
+      padding: 0.75rem 0 0; flex-wrap: wrap;
+    }
+    .vl-step {
+      display: inline-flex; align-items: center; gap: 0.45rem;
+      font-size: 0.78rem; font-weight: 600; color: var(--muted);
+    }
+    .vl-step span {
+      width: 1.55rem; height: 1.55rem; border-radius: 50%;
+      display: inline-flex; align-items: center; justify-content: center;
+      font-family: var(--mono); font-size: 0.62rem;
+      border: 1px solid var(--border); background: var(--bg-panel);
+    }
+    .vl-step.active { color: var(--text); }
+    .vl-step.active span { border-color: rgba(255, 163, 102, 0.55); background: var(--accent-dim); color: var(--accent); }
+    .vl-step.done { color: var(--muted); }
+    .vl-step.done span { border-color: rgba(94, 224, 184, 0.45); color: var(--teal); background: rgba(94, 224, 184, 0.08); }
+    .vl-step-line { width: 2.25rem; height: 1px; background: var(--border); opacity: 0.65; }
+    .drop-zone {
+      border: 2px dashed var(--border);
+      border-radius: var(--radius);
+      padding: 2rem 1rem;
+      margin: 1rem 0;
+      background: rgba(255,255,255,0.02);
+      transition: border-color 0.2s, background 0.2s;
+    }
+    .drop-zone:hover { border-color: rgba(255, 163, 102, 0.38); background: var(--accent-dim); }
+    .vl-work-grid {
+      display: grid;
+      grid-template-columns: 1fr min(300px, 100%);
+      gap: 1rem;
+      margin-top: 1rem;
+      align-items: start;
+    }
+    @media (max-width: 960px) { .vl-work-grid { grid-template-columns: 1fr; } }
+    .vl-process-bar {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 0.65rem;
+      padding: 0.75rem 1rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 0.75rem;
+    }
+    .file-pill {
+      font-family: var(--mono); font-size: 0.72rem; color: var(--teal);
+      padding: 0.25rem 0.6rem; border-radius: 8px;
+      background: var(--teal-dim); border: 1px solid rgba(94, 224, 184, 0.25);
+      max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    /* --- Wizard screens: spacing + entrance --- */
+    .vl-screen {
+      margin-bottom: var(--space-section);
+    }
+    .vl-screen.vl-screen--enter,
+    .vl-workspace-wrap.vl-screen--enter {
+      animation: vlFadeUp 0.5s var(--ease-out) both;
+    }
+    .vl-screen__inner {
+      padding: clamp(1.35rem, 3.5vw, 2rem) clamp(1.25rem, 3vw, 2rem);
+    }
+    .vl-screen-title {
+      font-family: var(--font-display);
+      font-weight: 700;
+      font-size: clamp(1.15rem, 2.5vw, 1.45rem);
+      letter-spacing: -0.03em;
+      margin: 0 0 0.5rem;
+      background: linear-gradient(120deg, var(--accent) 0%, var(--teal) 50%, #a8c4ff 100%);
+      background-size: 200% auto;
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+      animation: vlShimmer 7s linear infinite;
+    }
+    .vl-screen-kicker {
+      font-family: var(--mono);
+      font-size: 0.65rem;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 0 0 0.75rem;
+    }
+    .vl-screen-lead {
+      font-size: 0.92rem;
+      line-height: 1.55;
+      color: var(--muted);
+      margin: 0 0 1.25rem;
+      max-width: 36rem;
+    }
+    .vl-hook-row {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.65rem;
+      margin-bottom: 1rem;
+    }
+    .vl-hook-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-family: var(--mono);
+      font-size: 0.62rem;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      padding: 0.4rem 0.75rem;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 163, 102, 0.35);
+      background: linear-gradient(135deg, rgba(255, 163, 102, 0.15), rgba(94, 224, 184, 0.08));
+      color: var(--accent);
+      animation: vlPulse 2.8s ease-in-out infinite;
+    }
+    .vl-hook-badge .dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--teal);
+      box-shadow: 0 0 10px var(--teal);
+    }
+    .vl-hero-art {
+      position: absolute;
+      width: 120px; height: 120px;
+      right: 8%;
+      top: 50%;
+      transform: translateY(-50%);
+      border-radius: 32px;
+      background: linear-gradient(145deg, rgba(255, 163, 102, 0.12), rgba(94, 224, 184, 0.06));
+      border: 1px solid var(--border);
+      animation: vlFloat 5s ease-in-out infinite;
+      pointer-events: none;
+      opacity: 0.9;
+    }
+    @media (max-width: 720px) { .vl-hero-art { display: none; } }
+
+    .vl-panel-hero {
+      position: relative;
+      max-width: 560px;
+      margin: 1.5rem auto 0;
+      text-align: left;
+      padding: 0 !important;
+    }
+    .vl-panel-hero .vl-screen__inner { padding-top: 2rem; }
+
+    .drop-zone {
+      position: relative;
+      padding: 2.5rem 1.5rem;
+      margin: 1.25rem 0 1.5rem;
+    }
+    .dz-lead {
+      margin: 0 0 0.85rem;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+    .dz-file-label {
+      margin-top: 0.85rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+    }
+    .file-recap {
+      font-size: 0.88rem;
+      color: var(--muted);
+      margin: -0.35rem 0 1.35rem;
+      line-height: 1.45;
+    }
+    .file-recap strong { color: var(--text); }
+    .vl-bar-label {
+      font-size: 0.72rem;
+      color: var(--muted);
+      font-family: var(--mono);
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+    .vl-workspace-wrap { margin-top: var(--space-section); }
+    .btn-row-spaced { margin-top: 1.5rem; display: flex; justify-content: flex-end; gap: 0.75rem; flex-wrap: wrap; }
+
+    .btn {
+      transition: transform 0.2s var(--ease-out), box-shadow 0.2s, background 0.2s, border-color 0.2s;
+    }
+    .btn:active { transform: scale(0.98); }
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 24px rgba(30, 45, 74, 0.45);
+    }
+    .btn-run:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 8px 28px rgba(94, 224, 184, 0.15);
+    }
+
+    .model-grid { gap: 0.75rem; }
+    .model-box {
+      padding: 1rem 1rem;
+      border-radius: var(--radius-sm);
+      transition: transform 0.2s var(--ease-out), border-color 0.2s, box-shadow 0.2s;
+    }
+    .model-box:hover { transform: translateY(-2px); box-shadow: 0 8px 28px rgba(0,0,0,0.35); }
+
+    .vl-process-bar {
+      padding: 1rem 1.25rem;
+      gap: 0.75rem 1rem;
+      margin-bottom: 1rem;
+    }
+    .control-strip {
+      padding: 1rem 1.15rem;
+      gap: 0.75rem 1rem;
+      margin-bottom: 0;
+    }
+
+    .video-shell.video-shell--live {
+      animation: vlLiveRing 2s ease-out infinite;
+    }
+
     .thumb-strip {
       display: flex;
-      gap: 0.5rem;
+      gap: 0.75rem;
       overflow-x: auto;
-      margin-top: 0.75rem;
-      padding-bottom: 0.25rem;
+      margin-top: 1rem;
+      padding: 0.35rem 0.25rem 0.5rem;
+      scroll-snap-type: x mandatory;
     }
     .thumb-strip .t {
-      flex: 0 0 72px;
-      border-radius: 8px;
+      flex: 0 0 84px;
       overflow: hidden;
       border: 1px solid var(--border);
       font-size: 0.58rem;
       color: var(--muted);
       text-align: center;
+      scroll-snap-align: start;
+      cursor: pointer;
+      transition: transform 0.25s var(--ease-out), box-shadow 0.25s;
+      border-radius: var(--radius-sm);
     }
-    .thumb-strip .t img { width: 100%; aspect-ratio: 16/10; object-fit: cover; display: block; }
-    .thumb-strip .t .c { padding: 0.2rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .thumb-strip .t img {
+      width: 100%;
+      aspect-ratio: 16/10;
+      object-fit: cover;
+      display: block;
+      cursor: zoom-in;
+    }
+    .thumb-strip .t .c {
+      padding: 0.2rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .thumb-strip .t:hover {
+      transform: scale(1.06);
+      box-shadow: 0 10px 32px rgba(0,0,0,0.45);
+      z-index: 1;
+    }
+    .thumb-strip .t:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+    .thumb-strip .t .zoom-hint {
+      font-size: 0.55rem;
+      color: var(--muted);
+      padding: 0.15rem 0.2rem 0.35rem;
+      opacity: 0.85;
+    }
+
+    .live-frame, .poster {
+      cursor: zoom-in;
+    }
+    .live-frame:focus-visible,
+    .poster:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 3px;
+    }
+
+    /* Image lightbox */
+    .vl-lightbox {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1.5rem;
+      background: rgba(4, 6, 10, 0.88);
+      backdrop-filter: blur(8px);
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.3s var(--ease-out), visibility 0.3s;
+    }
+    .vl-lightbox.is-open {
+      opacity: 1;
+      visibility: visible;
+    }
+    .vl-lightbox__inner {
+      position: relative;
+      max-width: min(96vw, 1100px);
+      max-height: 90vh;
+      animation: vlFadeUp 0.35s var(--ease-out) both;
+    }
+    .vl-lightbox__inner img {
+      display: block;
+      max-width: 100%;
+      max-height: min(85vh, 900px);
+      width: auto;
+      height: auto;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      box-shadow: 0 24px 80px rgba(0,0,0,0.65);
+    }
+    .vl-lightbox__cap {
+      margin-top: 0.75rem;
+      text-align: center;
+      font-size: 0.85rem;
+      color: var(--muted);
+      font-family: var(--mono);
+    }
+    .vl-lightbox__close {
+      position: absolute;
+      top: -0.25rem;
+      right: -0.25rem;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--text);
+      font-size: 1.35rem;
+      line-height: 1;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s, transform 0.2s;
+    }
+    .vl-lightbox__close:hover {
+      background: var(--red-dim);
+      color: #ffb4b4;
+      transform: scale(1.05);
+    }
+
+    .card {
+      transition: transform 0.25s var(--ease-out), border-color 0.25s;
+    }
+    .card:hover {
+      border-color: rgba(255, 163, 102, 0.2);
+    }
+
+    .app-header {
+      padding: clamp(1.25rem, 3vw, 2rem) clamp(1rem, 3vw, 2rem) 1rem;
+      border-bottom: 1px solid var(--border);
+      align-items: center;
+    }
+    .app-header h1 {
+      font-family: var(--font-display);
+      font-size: clamp(1.5rem, 4vw, 1.85rem);
+      font-weight: 800;
+      letter-spacing: -0.04em;
+    }
+    .vl-shell { padding: 0 clamp(1rem, 3vw, 2rem) 3rem; }
+
+    .vl-stepper {
+      padding: 1rem 0 1.5rem;
+      gap: 0.5rem;
+    }
+    .vl-step-line {
+      width: clamp(1.5rem, 6vw, 3rem);
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--border), transparent);
+    }
+
+    #toast.toast {
+      border-radius: var(--radius-sm);
+      animation: vlFadeUp 0.4s var(--ease-out) both;
+    }
   </style>
 </head>
-<body>
+<body class="vl-app">
+  <div class="vl-bg-mesh" aria-hidden="true"></div>
+  <div class="vl-shell">
   <header class="app-header">
     <div>
       <h1>VioLane</h1>
-      <p class="tagline">Upload a clip for YOLO + rule checks (restricted hours, triple seat, helmet) + plate OCR. Same pipeline as the Python app.</p>
+      <p class="tagline">Traffic analytics: upload your clip, choose detectors, then run the same pipeline as the Python app.</p>
     </div>
     <div class="badges">
       <span class="badge">YOLO</span>
-      <span class="badge upload">FILE UPLOAD</span>
+      <span class="badge upload">UPLOAD FIRST</span>
       <span class="badge muted">EASYOCR</span>
       <span class="badge" id="live-badge" style="display:none;border-color:rgba(255,180,80,0.4);color:#ffb454">LIVE</span>
     </div>
   </header>
 
-  <div class="layout">
+  <nav class="vl-stepper" id="wizard-nav" aria-label="Workflow steps">
+    <div class="vl-step active" data-step="1"><span>1</span> Upload</div>
+    <div class="vl-step-line"></div>
+    <div class="vl-step" data-step="2"><span>2</span> Models</div>
+    <div class="vl-step-line"></div>
+    <div class="vl-step" data-step="3"><span>3</span> Process</div>
+  </nav>
+
+  <section class="screen-panel vl-panel-hero vl-screen vl-screen--enter" id="screen-upload">
+    <div class="vl-hero-art" aria-hidden="true"></div>
+    <div class="vl-screen__inner">
+      <div class="vl-hook-row">
+        <span class="vl-hook-badge"><span class="dot" aria-hidden="true"></span> Violation-aware preview</span>
+      </div>
+      <p class="vl-screen-kicker">Step 1 · Media</p>
+      <h2 class="vl-screen-title">Upload your footage</h2>
+      <p class="vl-screen-lead">Drop a video or still. The same detector stack as your Python pipeline—just in the browser.</p>
+      <div class="drop-zone" id="drop-zone">
+        <input type="file" id="video" class="file-input" accept="video/mp4,video/quicktime,.mp4,.mov,.avi,.mkv,image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp,.bmp" />
+        <p class="dz-lead">Drop a file here or browse</p>
+        <button type="button" class="btn btn-teal" id="pick-file">Choose file</button>
+        <div id="file-label" class="dz-file-label">No file selected</div>
+      </div>
+      <div class="btn-row-spaced">
+        <button type="button" class="btn btn-primary" id="btn-upload-next">Continue to detectors →</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="screen-panel vl-screen" id="screen-models" style="display:none">
+    <div class="vl-screen__inner">
+      <div class="vl-hook-row">
+        <span class="vl-hook-badge"><span class="dot" aria-hidden="true"></span> Load only what you need</span>
+      </div>
+      <p class="vl-screen-kicker">Step 2 · Detectors</p>
+      <h2 class="vl-screen-title">Choose your stack</h2>
+      <p class="vl-screen-lead">Checked weights are loaded into memory. Trim the list for faster cold starts.</p>
+      <p id="recap-file" class="file-recap"></p>
+      <div id="model-boxes">Loading models…</div>
+      <div class="btn-row-spaced" style="justify-content:space-between">
+        <button type="button" class="btn btn-ghost" id="btn-back-upload">← Back</button>
+        <button type="button" class="btn btn-primary" id="btn-models-next">Continue to run →</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="screen-panel vl-screen" id="screen-process" style="display:none">
+    <div class="vl-screen__inner">
+      <div class="vl-hook-row">
+        <span class="vl-hook-badge"><span class="dot" aria-hidden="true"></span> Stream while it runs</span>
+      </div>
+      <p class="vl-screen-kicker">Step 3 · Analysis</p>
+      <h2 class="vl-screen-title">Run the pipeline</h2>
+      <p class="vl-screen-lead">Set the truck window, start the job, and watch frames plus plate crops update live.</p>
+      <div class="vl-process-bar">
+        <span class="vl-bar-label">File</span>
+        <span class="file-pill" id="process-file-pill">—</span>
+        <span class="vl-bar-label">Models</span>
+        <div class="selected-chips" id="selected-chips"></div>
+      </div>
+      <div class="control-strip">
+        <p class="hint">Restricted-hours truck rule uses the window below. Click <strong>Run analysis</strong> when ready.</p>
+        <div class="truck-mini">
+          Truck window
+          <input type="number" id="truck_s" min="0" max="23" value="6" title="start hour" />
+          –
+          <input type="number" id="truck_e" min="1" max="24" value="22" title="end hour exclusive" />
+        </div>
+        <button type="button" class="btn btn-ghost" id="btn-back-models-2">← Back</button>
+        <button type="button" class="btn btn-run" id="run">Run analysis</button>
+      </div>
+    </div>
+  </section>
+
+  <div class="vl-work-grid vl-workspace-wrap" id="vl-workspace" style="display:none">
     <main class="main-col">
-      <div class="screen-panel" id="screen-models">
-        <h2>1 · Select models</h2>
-        <p class="sub">Click one or more boxes to select detectors (multiple selection). Only checked weights load. Then continue to upload.</p>
-        <div id="model-boxes">Loading models…</div>
-        <div style="margin-top:0.75rem">
-          <button type="button" class="btn btn-primary" id="btn-continue-upload">Continue to upload →</button>
-        </div>
-      </div>
-
-      <div class="screen-panel" id="screen-upload" style="display:none">
-        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:0.75rem;margin-bottom:0.5rem">
-          <button type="button" class="btn btn-ghost" id="btn-back-models">← Change models</button>
-          <span style="font-size:0.78rem;color:var(--muted)">Selected:</span>
-          <div class="selected-chips" id="selected-chips"></div>
-        </div>
-        <div class="control-strip">
-          <p class="hint"><strong>2 · Upload & run</strong> — the preview shows each <strong>annotated</strong> frame. With server real-time pacing, frames arrive at about the video’s FPS.</p>
-          <input type="file" id="video" class="file-input" accept="video/mp4,video/quicktime,.mp4,.mov,.avi,.mkv,image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp,.bmp" />
-          <button type="button" class="btn btn-teal" id="pick-file">Choose file</button>
-          <span id="file-label" style="font-size:0.78rem;color:var(--muted)">No file</span>
-          <button type="button" class="btn btn-run" id="run">Run analysis</button>
-          <div class="truck-mini">
-            truck window
-            <input type="number" id="truck_s" min="0" max="23" value="6" title="start hour" />
-            –
-            <input type="number" id="truck_e" min="1" max="24" value="22" title="end hour exclusive" />
-          </div>
-        </div>
-      </div>
-
       <div class="video-shell" id="video-shell">
         <div class="placeholder" id="ph-main">Output preview appears here when you run.<br /><span style="font-size:0.8em;opacity:0.8">Annotated frames stream in <strong>real time</strong> (violations on-frame, paced to source FPS when enabled in config).</span></div>
         <img class="live-frame" id="live-frame" alt="" style="display:none" />
@@ -505,7 +938,6 @@
       </div>
 
       <div class="thumb-strip" id="thumbs" style="display:none"></div>
-      <div id="toast"></div>
     </main>
 
     <aside class="sidebar">
@@ -547,27 +979,176 @@
     </aside>
   </div>
 
+  <div id="toast" style="margin-top:0.75rem"></div>
+
+  </div>
+
+  <div class="vl-lightbox" id="vl-lightbox" role="dialog" aria-modal="true" aria-label="Enlarged image" aria-hidden="true">
+    <div class="vl-lightbox__inner" id="vl-lightbox-panel">
+      <button type="button" class="vl-lightbox__close" id="vl-lightbox-close" aria-label="Close preview">×</button>
+      <img id="vl-lightbox-img" alt="" />
+      <div class="vl-lightbox__cap" id="vl-lightbox-cap"></div>
+    </div>
+  </div>
+
   <script>
     const $ = (id) => document.getElementById(id);
     const toast = $('toast');
     const modelBoxes = $('model-boxes');
     const screenModels = $('screen-models');
     const screenUpload = $('screen-upload');
+    const screenProcess = $('screen-process');
+    const workspace = $('vl-workspace');
     const selectedChips = $('selected-chips');
-    const btnContinue = $('btn-continue-upload');
-    const btnBackModels = $('btn-back-models');
     let selectedModelIds = [];
+
+    function escapeHtml(s) {
+      const d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+    let stagedFileName = '';
     const player = $('player');
     const poster = $('poster');
     const liveFrame = $('live-frame');
     const phMain = $('ph-main');
     const hud = $('hud');
     const liveBadge = $('live-badge');
+    const videoShell = $('video-shell');
+    const lightbox = $('vl-lightbox');
+    const lightboxImg = $('vl-lightbox-img');
+    const lightboxCap = $('vl-lightbox-cap');
+
+    function openLightbox(src, caption) {
+      if (!src) return;
+      lightboxImg.src = src;
+      lightboxImg.alt = caption || 'Evidence';
+      const cap = (caption || '').trim();
+      lightboxCap.textContent = cap;
+      lightboxCap.style.display = cap ? 'block' : 'none';
+      lightbox.classList.add('is-open');
+      lightbox.setAttribute('aria-hidden', 'false');
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeLightbox() {
+      lightbox.classList.remove('is-open');
+      lightbox.setAttribute('aria-hidden', 'true');
+      document.body.style.overflow = '';
+    }
+
+    lightbox.addEventListener('click', (e) => {
+      if (e.target === lightbox) closeLightbox();
+    });
+    $('vl-lightbox-close').addEventListener('click', (e) => {
+      e.stopPropagation();
+      closeLightbox();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && lightbox.classList.contains('is-open')) closeLightbox();
+    });
+
+    function attachImageZoom(el, captionFn) {
+      el.addEventListener('click', () => {
+        if (el.style.display === 'none' || !el.getAttribute('src')) return;
+        openLightbox(el.src, captionFn());
+      });
+      el.addEventListener('keydown', (e) => {
+        if ((e.key === 'Enter' || e.key === ' ') && el.style.display !== 'none' && el.getAttribute('src')) {
+          e.preventDefault();
+          openLightbox(el.src, captionFn());
+        }
+      });
+    }
+    attachImageZoom(liveFrame, () => 'Live frame');
+    attachImageZoom(poster, () => 'Output preview');
+    liveFrame.setAttribute('tabindex', '0');
+    poster.setAttribute('tabindex', '0');
+
+    $('thumbs').addEventListener('click', (e) => {
+      const row = e.target.closest('.t');
+      if (!row || !$('thumbs').contains(row)) return;
+      const img = row.querySelector('img');
+      const capEl = row.querySelector('.c');
+      if (img && img.src) openLightbox(img.src, capEl ? capEl.textContent : '');
+    });
+
+    function setWizardStep(step) {
+      document.querySelectorAll('.vl-step').forEach((el) => {
+        const s = parseInt(el.dataset.step, 10);
+        el.classList.toggle('active', s === step);
+        el.classList.toggle('done', s < step);
+      });
+      [screenUpload, screenModels, screenProcess, workspace].forEach((el) => el.classList.remove('vl-screen--enter'));
+
+      screenUpload.style.display = step === 1 ? 'block' : 'none';
+      screenModels.style.display = step === 2 ? 'block' : 'none';
+      screenProcess.style.display = step === 3 ? 'block' : 'none';
+      workspace.style.display = step === 3 ? 'grid' : 'none';
+
+      requestAnimationFrame(() => {
+        if (step === 1) screenUpload.classList.add('vl-screen--enter');
+        if (step === 2) screenModels.classList.add('vl-screen--enter');
+        if (step === 3) {
+          screenProcess.classList.add('vl-screen--enter');
+          workspace.classList.add('vl-screen--enter');
+        }
+      });
+    }
 
     $('pick-file').addEventListener('click', () => $('video').click());
-    $('video').addEventListener('change', (e) => {
+    const vidInput = $('video');
+    vidInput.addEventListener('change', (e) => {
       const f = e.target.files[0];
-      $('file-label').textContent = f ? f.name : 'No file';
+      $('file-label').textContent = f ? f.name : 'No file selected';
+      stagedFileName = f ? f.name : '';
+    });
+
+    $('drop-zone').addEventListener('dragover', (e) => { e.preventDefault(); e.currentTarget.style.borderColor = 'rgba(255, 163, 102, 0.45)'; });
+    $('drop-zone').addEventListener('dragleave', (e) => { e.currentTarget.style.borderColor = ''; });
+    $('drop-zone').addEventListener('drop', (e) => {
+      e.preventDefault();
+      e.currentTarget.style.borderColor = '';
+      const f = e.dataTransfer.files[0];
+      if (!f) return;
+      try {
+        const dt = new DataTransfer();
+        dt.items.add(f);
+        vidInput.files = dt.files;
+        vidInput.dispatchEvent(new Event('change', { bubbles: true }));
+      } catch (_) {}
+    });
+
+    $('btn-upload-next').addEventListener('click', () => {
+      const f = vidInput.files[0];
+      if (!f) {
+        showToast('Choose a video or image first.', 'err');
+        return;
+      }
+      stagedFileName = f.name;
+      $('recap-file').innerHTML = '<strong>File:</strong> ' + escapeHtml(f.name);
+      setWizardStep(2);
+    });
+
+    $('btn-back-upload').addEventListener('click', () => setWizardStep(1));
+
+    $('btn-models-next').addEventListener('click', () => {
+      const checked = [...document.querySelectorAll('#model-boxes input[name="model"]:checked')].map((x) => x.value);
+      if (!checked.length) {
+        showToast('Select at least one detector.', 'err');
+        return;
+      }
+      selectedModelIds = checked;
+      renderSelectedChips(selectedModelIds);
+      $('process-file-pill').textContent = stagedFileName || '—';
+      setWizardStep(3);
+    });
+
+    $('btn-back-models-2').addEventListener('click', () => {
+      setWizardStep(2);
+      document.querySelectorAll('#model-boxes input[name="model"]').forEach((inp) => {
+        inp.checked = selectedModelIds.includes(inp.value);
+      });
     });
 
     $('playback-speed').addEventListener('input', (e) => {
@@ -613,32 +1194,13 @@
       });
     }
 
-    btnContinue.addEventListener('click', () => {
-      const checked = [...document.querySelectorAll('#model-boxes input[name="model"]:checked')].map((x) => x.value);
-      if (!checked.length) {
-        showToast('Select at least one model, then continue.', 'err');
-        return;
-      }
-      selectedModelIds = checked;
-      renderSelectedChips(selectedModelIds);
-      screenModels.style.display = 'none';
-      screenUpload.style.display = 'block';
-    });
-
-    btnBackModels.addEventListener('click', () => {
-      screenUpload.style.display = 'none';
-      screenModels.style.display = 'block';
-      document.querySelectorAll('#model-boxes input[name="model"]').forEach((inp) => {
-        inp.checked = selectedModelIds.includes(inp.value);
-      });
-    });
-
     function showToast(html, cls) {
       toast.innerHTML = html;
       toast.className = 'toast ' + (cls || '');
     }
 
     function resetOutput() {
+      videoShell.classList.remove('video-shell--live');
       player.style.display = 'none';
       poster.style.display = 'none';
       liveFrame.style.display = 'none';
@@ -694,8 +1256,8 @@
         ? selectedModelIds
         : [...document.querySelectorAll('#model-boxes input[name="model"]:checked')].map((x) => x.value);
       resetOutput();
-      if (!selected.length) { showToast('Select models on step 1, then Continue to upload.', 'err'); return; }
-      if (!v) { showToast('Choose a video file.', 'err'); return; }
+      if (!selected.length) { showToast('Select at least one detector in step 2.', 'err'); return; }
+      if (!v) { showToast('Go back to step 1 and choose a file.', 'err'); return; }
 
       const fd = new FormData();
       fd.append('video', v);
@@ -711,6 +1273,7 @@
         const res = await fetch('/api/run-stream', { method: 'POST', body: fd });
         if (!res.ok) {
           liveBadge.style.display = 'none';
+          videoShell.classList.remove('video-shell--live');
           const t = await res.text();
           let j; try { j = JSON.parse(t); } catch (_) { j = {}; }
           showToast(String(j.detail || t || res.statusText), 'err');
@@ -733,6 +1296,7 @@
             try { ev = JSON.parse(chunk.slice(6)); } catch (_) { continue; }
 
             if (ev.type === 'start') {
+              videoShell.classList.add('video-shell--live');
               phMain.style.display = 'none';
               hud.style.display = 'block';
             }
@@ -769,12 +1333,13 @@
               strip.style.display = 'flex';
               const d = document.createElement('div');
               d.className = 't';
-              d.innerHTML = `<img src="${ev.thumb}" alt="" /><div class="c">${escapeHtml(ev.text)}</div>`;
+              d.innerHTML = `<img src="${ev.thumb}" alt="" loading="lazy" /><span class="zoom-hint">Tap to zoom</span><div class="c">${escapeHtml(ev.text)}</div>`;
               strip.insertBefore(d, strip.firstChild);
               while (strip.children.length > 28) strip.removeChild(strip.lastChild);
             }
             if (ev.type === 'done') {
               liveBadge.style.display = 'none';
+              videoShell.classList.remove('video-shell--live');
               applySummary(ev);
               $('st-frame-viol').textContent = '0';
               liveFrame.style.display = 'none';
@@ -786,7 +1351,7 @@
                 plates.slice().reverse().slice(0, 24).forEach((p) => {
                   const d = document.createElement('div');
                   d.className = 't';
-                  d.innerHTML = `<img src="${p.thumb}" alt="" /><div class="c">${escapeHtml(p.text)}</div>`;
+                  d.innerHTML = `<img src="${p.thumb}" alt="" loading="lazy" /><span class="zoom-hint">Tap to zoom</span><div class="c">${escapeHtml(p.text)}</div>`;
                   strip.appendChild(d);
                 });
               }
@@ -816,24 +1381,21 @@
             }
             if (ev.type === 'error') {
               liveBadge.style.display = 'none';
+              videoShell.classList.remove('video-shell--live');
               showToast(ev.message || 'Error', 'err');
             }
           }
         }
       } catch (e) {
         liveBadge.style.display = 'none';
+        videoShell.classList.remove('video-shell--live');
         showToast('Request failed: ' + e, 'err');
       } finally {
         btn.disabled = false;
         liveBadge.style.display = 'none';
+        videoShell.classList.remove('video-shell--live');
       }
     });
-
-    function escapeHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
-    }
   </script>
 </body>
 </html>

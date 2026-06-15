@@ -10,7 +10,7 @@ import cv2
 
 import config
 from utils.detectors import MultiModelDetector, expand_bbox_xyxy
-from utils.plate_ocr import get_plate_reader
+from utils.plate_ocr import get_plate_reader, ocr_plate_detections_one_shot
 from utils.plate_track_ocr import PlateOCRGate
 from utils.tracker import CentroidTracker
 from utils.violations import (
@@ -248,7 +248,12 @@ class TrafficPipeline:
             helmet_viol_class_ids=helmet_viol_ids,
         )
         self._ocr_reader = None
-        self._plate_gate = PlateOCRGate() if self.use_plate else None
+        self._plate_gate = (
+            PlateOCRGate()
+            if self.use_plate and bool(getattr(config, "PLATE_USE_TRACK_OCR_GATE", True))
+            else None
+        )
+        self._plate_simple_frame = 0
         self._plate_yolo_frame_counter = 0
         self._cached_plate_dets: List[dict] = []
         # When dedicated plate YOLO is on, drop plate-like classes from truck/triple/etc. (same boxes from weaker head).
@@ -311,6 +316,64 @@ class TrafficPipeline:
             return self._ocr_reader
         self._ocr_reader = get_plate_reader(config.EASYOCR_LANGS)
         return self._ocr_reader
+
+    def _plate_reads_direct_no_gate(self, frame, plate_dets: List[dict], truck_dets: List[dict]) -> List[Dict[str, Any]]:
+        """
+        Plate YOLO → crop → EasyOCR with no temporal tracker (see ``PLATE_USE_TRACK_OCR_GATE``).
+        Throttled by ``PLATE_OCR_ATTEMPT_EVERY_N_FRAMES``; off-stride frames show boxes only (pending).
+        """
+        self._plate_simple_frame += 1
+        stride = max(1, int(getattr(config, "PLATE_OCR_ATTEMPT_EVERY_N_FRAMES", 1)))
+        truck_boxes = [d["bbox"] for d in truck_dets]
+
+        if (self._plate_simple_frame % stride) != 0:
+            out: List[Dict[str, Any]] = []
+            for i, d in enumerate(plate_dets):
+                x1, y1, x2, y2 = [int(x) for x in d["bbox"]]
+                raw = d.get("bbox_raw")
+                out.append(
+                    {
+                        "track_id": i,
+                        "bbox": [x1, y1, x2, y2],
+                        "bbox_raw": [int(x) for x in raw] if raw is not None else [x1, y1, x2, y2],
+                        "text": "",
+                        "confidence": 0.0,
+                        "yolo_conf": float(d.get("confidence", 0.0)),
+                        "pending": True,
+                        "ocr_error": False,
+                        "sharpness": 0.0,
+                        "stable_frames": 0,
+                        "near_truck": False,
+                    }
+                )
+            return out
+
+        min_y = float(getattr(config, "PLATE_OCR_MIN_YOLO_CONF", 0.5))
+        shot = ocr_plate_detections_one_shot(
+            frame,
+            plate_dets,
+            self._get_ocr_reader(),
+            min_yolo_conf=min_y,
+            truck_boxes=truck_boxes,
+        )
+        plate_reads: List[Dict[str, Any]] = []
+        for i, row in enumerate(shot):
+            plate_reads.append(
+                {
+                    "track_id": i,
+                    "bbox": list(row["bbox"]),
+                    "bbox_raw": list(row["bbox_raw"]) if row.get("bbox_raw") is not None else None,
+                    "text": str(row.get("text") or ""),
+                    "confidence": float(row.get("confidence") or 0.0),
+                    "yolo_conf": float(row.get("yolo_conf") or 0.0),
+                    "pending": not bool(row.get("text")),
+                    "ocr_error": bool(row.get("ocr_error", False)),
+                    "sharpness": 0.0,
+                    "stable_frames": 0,
+                    "near_truck": bool(row.get("near_truck", False)),
+                }
+            )
+        return plate_reads
 
     def _now_for_truck_rules(self, reference_time: Optional[datetime] = None) -> datetime:
         """Clock used for truck violation windows (optional IANA tz in config)."""
@@ -544,11 +607,11 @@ class TrafficPipeline:
             self.draw_detection(frame, det)
 
         plate_reads: List[Dict[str, Any]] = []
-        if self.use_plate and self._plate_gate is not None:
+        if self.use_plate and (
+            self._plate_gate is not None or not bool(getattr(config, "PLATE_USE_TRACK_OCR_GATE", True))
+        ):
             try:
                 if force_immediate_plate_ocr:
-                    from utils.plate_ocr import ocr_plate_detections_one_shot
-
                     min_y = float(getattr(config, "SAMPLE_OCR_MIN_YOLO_CONF", 0.35))
                     shot = ocr_plate_detections_one_shot(
                         frame,
@@ -575,8 +638,10 @@ class TrafficPipeline:
                                 "immediate_ocr": True,
                             }
                         )
-                else:
+                elif self._plate_gate is not None:
                     plate_reads = self._plate_gate.update(frame, plate_dets, self._get_ocr_reader)
+                else:
+                    plate_reads = self._plate_reads_direct_no_gate(frame, plate_dets, truck_dets)
             except Exception:
                 plate_reads = []
                 for d in plate_dets:
