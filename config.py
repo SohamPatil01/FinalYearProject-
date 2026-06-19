@@ -1,7 +1,7 @@
 """Central configuration for the traffic violation system."""
 
 from pathlib import Path
-from typing import Dict, List, Optional, TypedDict
+from typing import Dict, List, Optional, Tuple, TypedDict
 
 # Base paths
 BASE_DIR = Path(__file__).resolve().parent
@@ -26,7 +26,11 @@ MODEL_PATHS = {
 
 # Number-plate detector — **only** this checkpoint is used to localize plates for OCR.
 # Truck / triple / helmet models may expose plate-like class names; those boxes are dropped when plate is on.
-PLATE_MODEL_PATH = str(MODELS_DIR / "plate.pt")
+PLATE_MODEL_PATH = str(MODELS_DIR / "plate_best.pt")
+RED_LIGHT_MODEL_PATH = str(MODELS_DIR / "yolov10s.pt")
+NO_PARKING_MODEL_PATH = str(MODELS_DIR / "yolov8n.pt")
+RED_LIGHT_CONFIG_DIR = BASE_DIR / "config" / "red_light"
+ROI_SESSIONS_DIR = BASE_DIR / "config" / "roi" / "sessions"
 
 # When both **truck** and **plate** are active:
 # False (default): plate YOLO runs on full frame (recommended).
@@ -215,10 +219,10 @@ MODEL_CATALOG: List[ModelCatalogEntry] = [
     },
     {
         "id": "plate",
-        "file": "plate.pt",
+        "file": "plate_best.pt",
         "title": "Number plate",
         "summary": "Universal plate detector + OCR on crops.",
-        "description": "All plate localization for OCR uses `models/plate.pt` only. When off, no plate YOLO or OCR runs; plate-like boxes from other models are not used for text.",
+        "description": "All plate localization for OCR uses `models/plate_best.pt` only. When off, no plate YOLO or OCR runs.",
     },
 ]
 
@@ -356,3 +360,67 @@ WEB_PACE_MAX_FPS: float = 30.0
 
 # Min YOLO conf for one-shot plate OCR when `process_frame(..., force_immediate_plate_ocr=True)` is used (APIs/tools).
 SAMPLE_OCR_MIN_YOLO_CONF: float = 0.35
+
+
+class RuleCatalogEntry(TypedDict, total=False):
+    id: str
+    title: str
+    summary: str
+    requires_model: Optional[str]
+    needs_roi: List[str]
+
+
+RULE_CATALOG: List[RuleCatalogEntry] = [
+    {
+        "id": "helmet",
+        "title": "Helmet violation",
+        "summary": "Flags no-helmet detections from the helmet model.",
+        "requires_model": "helmet",
+    },
+    {
+        "id": "triple",
+        "title": "Triple seat",
+        "summary": "Triple-seat riding when triple model is enabled.",
+        "requires_model": "triple",
+    },
+    {
+        "id": "truck_restricted",
+        "title": "Truck restricted hours",
+        "summary": "Trucks during the configured time window.",
+        "requires_model": "truck",
+    },
+    {
+        "id": "plate_ocr",
+        "title": "Plate OCR",
+        "summary": "Read plate text from plate detector crops.",
+        "requires_model": "plate",
+    },
+    {
+        "id": "red_light",
+        "title": "Red light violation",
+        "summary": "Vehicles crossing stop line on red (yolov10s + ROIs).",
+        "needs_roi": ["signal_roi", "violation_rois"],
+    },
+    {
+        "id": "no_parking",
+        "title": "No parking",
+        "summary": "Vehicles inside a forbidden zone (yolov8n + zone ROI).",
+        "needs_roi": ["no_parking_zone"],
+    },
+]
+
+# Red-light engine (TrafficLight branch)
+RED_LIGHT_TRACK_DIRECTION: str = "none"
+RED_LIGHT_MIN_MOVE_PIXELS: int = 1
+RED_LIGHT_VEHICLE_CONF: float = 0.22
+RED_LIGHT_MIN_ROI_BOX_OVERLAP: float = 0.17
+RED_LIGHT_GRACE_FRAMES: int = 6
+RED_LIGHT_FRAME_SIZE: Tuple[int, int] = (1020, 600)
+
+# No-parking COCO class ids: car, motorcycle, bus, truck
+NO_PARKING_VEHICLE_CLASS_IDS: List[int] = [2, 3, 5, 7]
+NO_PARKING_VIOLATION_LABEL: str = "Wrong parking violation"
+# Violation only after the vehicle stays in-zone with little movement for this long.
+NO_PARKING_MIN_STAND_SEC: float = 5.0
+# Reset dwell timer if centroid moves more than this many pixels between frames.
+NO_PARKING_MAX_MOVE_PX: int = 15

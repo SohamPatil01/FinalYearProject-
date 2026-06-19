@@ -65,7 +65,10 @@
       align-items: flex-start;
       justify-content: space-between;
       padding: 1.25rem 1.5rem 0.75rem;
-      border-bottom: 1px solid var(--border);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      background: rgba(12, 14, 20, 0.4);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
       gap: 1rem;
       flex-wrap: wrap;
     }
@@ -304,11 +307,13 @@
     .sidebar { display: flex; flex-direction: column; gap: 0.85rem; }
 
     .card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
+      background: rgba(12, 14, 20, 0.55);
+      backdrop-filter: blur(14px) saturate(1.2);
+      -webkit-backdrop-filter: blur(14px) saturate(1.2);
+      border: 1px solid rgba(255, 255, 255, 0.06);
       border-radius: var(--radius);
       padding: 1rem;
-      box-shadow: inset 0 1px 0 rgba(255,255,255,0.03);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255,255,255,0.04);
     }
     .card h3 {
       margin: 0 0 0.85rem;
@@ -419,11 +424,19 @@
     .dl-row a:hover { text-decoration: underline; }
 
     .screen-panel {
-      border: 1px solid var(--border);
+      border: 1px solid rgba(255, 255, 255, 0.07);
       border-radius: var(--radius);
-      background: var(--bg-card);
+      background: rgba(12, 14, 20, 0.52);
+      backdrop-filter: blur(16px) saturate(1.15);
+      -webkit-backdrop-filter: blur(16px) saturate(1.15);
       padding: 1rem 1.1rem;
       margin-bottom: 0.75rem;
+      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+      transition: transform 0.4s var(--ease-out), box-shadow 0.4s, border-color 0.35s;
+    }
+    .screen-panel:hover {
+      border-color: rgba(94, 224, 184, 0.12);
+      box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
     }
     .screen-panel h2 {
       margin: 0 0 0.35rem;
@@ -453,13 +466,74 @@
       color: var(--teal);
     }
 
-    body.vl-app { position: relative; min-height: 100vh; }
+    body.vl-app { position: relative; min-height: 100vh; background: #0a0a0a; overflow-x: hidden; }
+
+    .vl-beams-bg {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      pointer-events: none;
+      background: #0a0a0a;
+      overflow: hidden;
+    }
+    #vl-beams-canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      filter: blur(15px);
+    }
+    .vl-beams-overlay {
+      position: absolute;
+      inset: 0;
+      background: rgba(10, 10, 10, 0.45);
+      backdrop-filter: blur(50px);
+      animation: vlBeamsPulse 10s ease-in-out infinite;
+    }
+    @keyframes vlBeamsPulse {
+      0%, 100% { opacity: 0.55; }
+      50% { opacity: 0.85; }
+    }
+
+    .vl-glass {
+      background: rgba(12, 14, 20, 0.55);
+      backdrop-filter: blur(14px) saturate(1.2);
+      -webkit-backdrop-filter: blur(14px) saturate(1.2);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+    }
+
+    .app-header {
+      animation: vlFadeUp 0.65s var(--ease-out) both;
+    }
+    .vl-stepper {
+      animation: vlFadeUp 0.75s var(--ease-out) 0.08s both;
+    }
+    .vl-step {
+      transition: color 0.35s var(--ease-out), transform 0.35s var(--ease-out);
+    }
+    .vl-step.active {
+      transform: translateY(-1px);
+    }
+    .vl-step span {
+      transition: border-color 0.35s, background 0.35s, color 0.35s, transform 0.35s var(--ease-out);
+    }
+    .vl-step.active span {
+      animation: vlPulse 2.5s ease-in-out infinite;
+    }
+
+    .model-box {
+      animation: vlFadeUp 0.5s var(--ease-out) both;
+    }
+    .model-grid .model-box:nth-child(1) { animation-delay: 0.04s; }
+    .model-grid .model-box:nth-child(2) { animation-delay: 0.08s; }
+    .model-grid .model-box:nth-child(3) { animation-delay: 0.12s; }
+    .model-grid .model-box:nth-child(4) { animation-delay: 0.16s; }
+    .model-grid .model-box:nth-child(5) { animation-delay: 0.2s; }
+    .model-grid .model-box:nth-child(6) { animation-delay: 0.24s; }
+
     .vl-bg-mesh {
-      position: fixed; inset: 0; z-index: 0; pointer-events: none;
-      background:
-        radial-gradient(ellipse 80% 50% at 15% -15%, rgba(255, 163, 102, 0.1), transparent 52%),
-        radial-gradient(ellipse 55% 45% at 95% 20%, rgba(94, 224, 184, 0.07), transparent 48%),
-        var(--bg-deep);
+      display: none;
     }
     .vl-shell { position: relative; z-index: 1; max-width: 1160px; margin: 0 auto; padding: 0 1.25rem 2.5rem; }
     .vl-stepper {
@@ -834,7 +908,10 @@
   </style>
 </head>
 <body class="vl-app">
-  <div class="vl-bg-mesh" aria-hidden="true"></div>
+  <div class="vl-beams-bg" aria-hidden="true">
+    <canvas id="vl-beams-canvas"></canvas>
+    <div class="vl-beams-overlay"></div>
+  </div>
   <div class="vl-shell">
   <header class="app-header">
     <div>
@@ -888,6 +965,13 @@
       <p class="vl-screen-lead">Checked weights are loaded into memory. Trim the list for faster cold starts.</p>
       <p id="recap-file" class="file-recap"></p>
       <div id="model-boxes">Loading models…</div>
+      <div class="vl-hook-row" style="margin-top:1.25rem">
+        <span class="vl-hook-badge"><span class="dot" aria-hidden="true"></span> Zone rules</span>
+      </div>
+      <p class="vl-screen-kicker" style="margin-top:0.5rem">Zone detectors</p>
+      <div id="rule-boxes" class="model-grid"></div>
+      <p id="load-count-label" class="file-recap" style="margin-top:0.75rem">0 models + 0 zone rules will load</p>
+      <p id="heavy-banner" class="file-recap" style="display:none;color:#ffb454;margin-top:0.35rem"></p>
       <div class="btn-row-spaced" style="justify-content:space-between">
         <button type="button" class="btn btn-ghost" id="btn-back-upload">← Back</button>
         <button type="button" class="btn btn-primary" id="btn-models-next">Continue to run →</button>
@@ -918,6 +1002,12 @@
           <input type="number" id="truck_e" min="1" max="24" value="22" title="end hour exclusive" />
         </div>
         <button type="button" class="btn btn-ghost" id="btn-back-models-2">← Back</button>
+        <div id="roi-controls" style="display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center">
+          <button type="button" class="btn btn-ghost" id="btn-roi-signal" style="display:none">Configure signal ROI</button>
+          <button type="button" class="btn btn-ghost" id="btn-roi-violation" style="display:none">Configure violation zones</button>
+          <button type="button" class="btn btn-ghost" id="btn-roi-nopark" style="display:none">Configure no-parking zone</button>
+        </div>
+        <span id="roi-status" class="file-recap" style="margin:0"></span>
         <button type="button" class="btn btn-run" id="run">Run analysis</button>
       </div>
     </div>
@@ -964,9 +1054,12 @@
       <div class="card">
         <h3>RULES</h3>
         <ul class="zone-list" id="rule-list">
-          <li><span class="zname">Restricted hours (truck)</span></li>
-          <li><span class="zname">Triple seat</span></li>
           <li><span class="zname">Helmet</span></li>
+          <li><span class="zname">Triple seat</span></li>
+          <li><span class="zname">Restricted hours (truck)</span></li>
+          <li><span class="zname">Plate OCR</span></li>
+          <li><span class="zname">Red light</span></li>
+          <li><span class="zname">No parking</span></li>
         </ul>
       </div>
 
@@ -1001,6 +1094,9 @@
     const workspace = $('vl-workspace');
     const selectedChips = $('selected-chips');
     let selectedModelIds = [];
+    let selectedRuleIds = [];
+    let sessionId = '';
+    let catalogRules = [];
 
     function escapeHtml(s) {
       const d = document.createElement('div');
@@ -1119,28 +1215,46 @@
       } catch (_) {}
     });
 
-    $('btn-upload-next').addEventListener('click', () => {
+    $('btn-upload-next').addEventListener('click', async () => {
       const f = vidInput.files[0];
       if (!f) {
         showToast('Choose a video or image first.', 'err');
         return;
       }
       stagedFileName = f.name;
-      $('recap-file').innerHTML = '<strong>File:</strong> ' + escapeHtml(f.name);
-      setWizardStep(2);
+      showToast('Uploading…', 'wait');
+      const fd = new FormData();
+      fd.append('video', f);
+      try {
+        const r = await fetch('/api/stage-upload', { method: 'POST', body: fd });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || r.statusText);
+        sessionId = data.session_id;
+        $('recap-file').innerHTML = '<strong>File:</strong> ' + escapeHtml(f.name);
+        if (data.preview) {
+          $('recap-file').innerHTML += '<br/><img src="' + data.preview + '" alt="" style="max-width:220px;margin-top:0.5rem;border-radius:8px" />';
+        }
+        setWizardStep(2);
+        showToast('Ready — pick detectors and rules.', 'ok');
+      } catch (e) {
+        showToast('Upload failed: ' + e, 'err');
+      }
     });
 
     $('btn-back-upload').addEventListener('click', () => setWizardStep(1));
 
     $('btn-models-next').addEventListener('click', () => {
       const checked = [...document.querySelectorAll('#model-boxes input[name="model"]:checked')].map((x) => x.value);
-      if (!checked.length) {
-        showToast('Select at least one detector.', 'err');
+      const rules = [...document.querySelectorAll('#rule-boxes input[name="rule"]:checked')].map((x) => x.value);
+      if (!checked.length && !rules.length) {
+        showToast('Select at least one detector or zone rule.', 'err');
         return;
       }
       selectedModelIds = checked;
-      renderSelectedChips(selectedModelIds);
+      selectedRuleIds = rules;
+      renderSelectedChips([...selectedModelIds, ...selectedRuleIds.map((r) => 'rule:' + r)]);
       $('process-file-pill').textContent = stagedFileName || '—';
+      updateRoiControls();
       setWizardStep(3);
     });
 
@@ -1169,6 +1283,7 @@
         inp.name = 'model';
         inp.value = m.id;
         if (!m.ready) inp.disabled = true;
+        inp.addEventListener('change', updateLoadCount);
         const title = document.createElement('span');
         title.className = 'model-box-title';
         title.textContent = m.title;
@@ -1181,7 +1296,83 @@
         grid.appendChild(lab);
       }
       modelBoxes.appendChild(grid);
+
+      catalogRules = data.rules || [];
+      const ruleBox = $('rule-boxes');
+      ruleBox.innerHTML = '';
+      for (const rule of catalogRules) {
+        if (!rule.needs_roi || !rule.needs_roi.length) continue;
+        const lab = document.createElement('label');
+        lab.className = 'model-box';
+        const inp = document.createElement('input');
+        inp.type = 'checkbox';
+        inp.name = 'rule';
+        inp.value = rule.id;
+        inp.addEventListener('change', () => { updateLoadCount(); updateRoiControls(); });
+        const title = document.createElement('span');
+        title.className = 'model-box-title';
+        title.textContent = rule.title;
+        lab.appendChild(inp);
+        lab.appendChild(title);
+        ruleBox.appendChild(lab);
+      }
+      updateLoadCount();
     }
+
+    function updateLoadCount() {
+      const models = [...document.querySelectorAll('#model-boxes input[name="model"]:checked')].map((x) => x.value);
+      const rules = [...document.querySelectorAll('#rule-boxes input[name="rule"]:checked')].map((x) => x.value);
+      let yolo = models.length;
+      if (rules.includes('red_light')) yolo += 1;
+      if (rules.includes('no_parking')) yolo += 1;
+      $('load-count-label').textContent = `${models.length} model(s) + ${rules.length} zone rule(s) — ${yolo} YOLO weight(s) will load`;
+      const banner = $('heavy-banner');
+      if (yolo >= 3) {
+        banner.style.display = 'block';
+        banner.textContent = 'Heavy combo: consider unchecking unused detectors for faster processing.';
+      } else {
+        banner.style.display = 'none';
+      }
+    }
+
+    async function refreshRoiStatus() {
+      if (!sessionId) return;
+      try {
+        const r = await fetch('/api/roi/' + sessionId);
+        const st = await r.json();
+        const bits = [];
+        if (st.signal_roi) bits.push('signal');
+        if (st.violation_rois) bits.push('violation zones');
+        if (st.no_parking_zone) bits.push('no-parking');
+        $('roi-status').textContent = bits.length ? 'ROI: ' + bits.join(', ') : 'ROI: not configured';
+      } catch (_) {}
+    }
+
+    function updateRoiControls() {
+      const rules = selectedRuleIds.length
+        ? selectedRuleIds
+        : [...document.querySelectorAll('#rule-boxes input[name="rule"]:checked')].map((x) => x.value);
+      $('btn-roi-signal').style.display = rules.includes('red_light') ? 'inline-block' : 'none';
+      $('btn-roi-violation').style.display = rules.includes('red_light') ? 'inline-block' : 'none';
+      $('btn-roi-nopark').style.display = rules.includes('no_parking') ? 'inline-block' : 'none';
+      refreshRoiStatus();
+    }
+
+    async function configureRoi(mode) {
+      if (!sessionId) { showToast('Upload media in step 1 first.', 'err'); return; }
+      const fd = new FormData();
+      fd.append('session_id', sessionId);
+      fd.append('mode', mode);
+      showToast('OpenCV ROI window — draw zone, press S to save, Q to cancel.', 'wait');
+      const r = await fetch('/api/roi/configure', { method: 'POST', body: fd });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) { showToast(data.detail || 'ROI setup failed', 'err'); return; }
+      showToast(data.message || 'ROI saved', 'ok');
+      refreshRoiStatus();
+    }
+    $('btn-roi-signal').addEventListener('click', () => configureRoi('signal'));
+    $('btn-roi-violation').addEventListener('click', () => configureRoi('violation'));
+    $('btn-roi-nopark').addEventListener('click', () => configureRoi('no_parking'));
     loadCatalog().catch(() => { modelBoxes.textContent = 'Could not load models'; });
 
     function renderSelectedChips(ids) {
@@ -1251,17 +1442,20 @@
 
     $('run').addEventListener('click', async () => {
       const btn = $('run');
-      const v = $('video').files[0];
       const selected = selectedModelIds.length
         ? selectedModelIds
         : [...document.querySelectorAll('#model-boxes input[name="model"]:checked')].map((x) => x.value);
+      const rules = selectedRuleIds.length
+        ? selectedRuleIds
+        : [...document.querySelectorAll('#rule-boxes input[name="rule"]:checked')].map((x) => x.value);
       resetOutput();
-      if (!selected.length) { showToast('Select at least one detector in step 2.', 'err'); return; }
-      if (!v) { showToast('Go back to step 1 and choose a file.', 'err'); return; }
+      if (!selected.length && !rules.length) { showToast('Select at least one detector or zone rule in step 2.', 'err'); return; }
+      if (!sessionId) { showToast('Go back to step 1 and upload a file.', 'err'); return; }
 
       const fd = new FormData();
-      fd.append('video', v);
+      fd.append('session_id', sessionId);
       fd.append('models', selected.join(','));
+      fd.append('rules', rules.join(','));
       fd.append('truck_start', $('truck_s').value);
       fd.append('truck_end', $('truck_e').value);
 
@@ -1299,6 +1493,12 @@
               videoShell.classList.add('video-shell--live');
               phMain.style.display = 'none';
               hud.style.display = 'block';
+              if (ev.warnings && ev.warnings.length) {
+                showToast(ev.warnings.join(' '), 'wait');
+              }
+              if (ev.models_loaded) {
+                prependLog('Loaded: ' + escapeHtml((ev.models_loaded || []).join(', ')), '');
+              }
             }
             if (ev.type === 'frame') {
               if (ev.image) {
@@ -1337,6 +1537,14 @@
               strip.insertBefore(d, strip.firstChild);
               while (strip.children.length > 28) strip.removeChild(strip.lastChild);
             }
+            if (ev.type === 'violation_new') {
+              const zone = ev.zone && ev.zone !== '—' ? ` · ${escapeHtml(ev.zone)}` : '';
+              const plate = ev.plate ? ` · plate <span class="plate-txt">${escapeHtml(ev.plate)}</span>` : '';
+              prependLog(
+                `${ev.t_sec}s · ${escapeHtml(ev.vid || '—')}${zone} · <span class="vio">${escapeHtml(ev.summary || 'Violation')}</span>${plate}`,
+                'vio'
+              );
+            }
             if (ev.type === 'done') {
               liveBadge.style.display = 'none';
               videoShell.classList.remove('video-shell--live');
@@ -1362,7 +1570,12 @@
                 evs.forEach((e) => {
                   const div = document.createElement('div');
                   div.className = 'ev';
-                  div.innerHTML = `${e.t_sec}s · ${escapeHtml(e.vid)} · ${escapeHtml(e.zone)} · plate <span class="plate-txt">${escapeHtml(e.plate)}</span>`;
+                  if (e.kind && e.kind !== 'plate') {
+                    const plate = e.plate ? ` · plate <span class="plate-txt">${escapeHtml(e.plate)}</span>` : '';
+                    div.innerHTML = `${e.t_sec}s · ${escapeHtml(e.vid)} · ${escapeHtml(e.zone)} · <span class="vio">${escapeHtml(e.summary || e.kind)}</span>${plate}`;
+                  } else {
+                    div.innerHTML = `${e.t_sec}s · ${escapeHtml(e.vid)} · ${escapeHtml(e.zone)} · plate <span class="plate-txt">${escapeHtml(e.plate)}</span>`;
+                  }
                   log.appendChild(div);
                 });
               }
@@ -1397,5 +1610,6 @@
       }
     });
   </script>
+  <script src="/static/js/beams-background.js" defer></script>
 </body>
 </html>

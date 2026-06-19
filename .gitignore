@@ -9,6 +9,12 @@ dist/
 build/
 .env
 *.log
+config/roi/sessions/
+saved_images/
+vljob_*/
+vlstage_*/
+*.mp4
+*.avi
 
 # Duplicate of models/plate.pt at repo root
 best (1).pt

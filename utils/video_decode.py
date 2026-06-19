@@ -94,6 +94,7 @@ def iter_decode_video(
     else:
         dec_skip = max(1, int(getattr(config, "VIDEO_DECODE_EVERY_N_FRAME", 1)))
     out_fps = max(1.0, fps / dec_skip)
+    pipeline.configure_video_timing(fps, dec_skip)
     writer: Optional[cv2.VideoWriter] = None
     if write_annotated_mp4:
         if out_path is None:
@@ -127,33 +128,7 @@ def iter_decode_video(
             orig = frame.copy() if pipeline.use_plate else None
             # Wall-clock slot for realtime SSE pacing (must be before heavy work).
             _pace_t0 = time.perf_counter()
-            # region agent log
-            _t_pf0 = _pace_t0
             processed, violations, meta = pipeline.process_frame(frame)
-            _proc_ms = (time.perf_counter() - _t_pf0) * 1000.0
-            if frame_idx <= 25 or frame_idx % 30 == 0:
-                try:
-                    with open("/Users/soham/Desktop/Two/.cursor/debug-53c9b3.log", "a") as _df:
-                        _df.write(
-                            json.dumps(
-                                {
-                                    "sessionId": "53c9b3",
-                                    "timestamp": int(time.time() * 1000),
-                                    "location": "video_decode.py:iter_decode_video",
-                                    "message": "after process_frame",
-                                    "data": {
-                                        "frame_idx": frame_idx,
-                                        "proc_ms": round(_proc_ms, 2),
-                                        "n_viol": len(violations),
-                                    },
-                                    "hypothesisId": "H1",
-                                }
-                            )
-                            + "\n"
-                        )
-                except Exception:
-                    pass
-            # endregion
             cum_viol += len(violations)
             n_before = len(captures)
             if pipeline.use_plate and orig is not None:
@@ -222,6 +197,7 @@ def iter_decode_image(
     h, w = int(frame.shape[0]), int(frame.shape[1])
     fps = 1.0
     dec_skip = 1
+    pipeline.configure_video_timing(fps, dec_skip)
     est_decoded = 1
     frame_idx = 1
 

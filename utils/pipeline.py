@@ -13,6 +13,8 @@ from utils.detectors import MultiModelDetector, expand_bbox_xyxy
 from utils.plate_ocr import get_plate_reader, ocr_plate_detections_one_shot
 from utils.plate_track_ocr import PlateOCRGate
 from utils.tracker import CentroidTracker
+from utils.events import merge_snapshots, normalize_engine_events
+from utils.logging_config import get_logger
 from utils.violations import (
     HELMET_VIOLATION_LABEL,
     TRIPLE_SEAT_VIOLATION_LABEL,
@@ -24,6 +26,8 @@ from utils.violations import (
     infer_triple_class_allowlist_from_yolo_names,
     infer_triple_semantics_from_yolo_names,
 )
+
+_log = get_logger("vl.pipeline")
 MODEL_DRAW_COLORS: Dict[str, tuple] = {
     "truck": (0, 255, 255),
     "triple": (255, 128, 0),
@@ -166,9 +170,14 @@ class TrafficPipeline:
         model_paths: Optional[Dict[str, str]] = None,
         truck_violation_active_start_hour: Optional[int] = None,
         truck_violation_active_end_hour: Optional[int] = None,
+        enabled_rules: Optional[Set[str]] = None,
+        roi_config: Optional[Dict[str, Any]] = None,
     ) -> None:
-        # Caller-provided paths (e.g. dashboard): run only those models — no silent extras.
-        # Default `model_paths=None` uses config.MODEL_PATHS and may add plate when weights exist (CLI).
+        self.enabled_rules: Set[str] = set(enabled_rules or [])
+        self.roi_config: Dict[str, Any] = dict(roi_config or {})
+        self._source_fps: float = float(getattr(config, "VIDEO_TARGET_PROCESS_FPS", 30) or 30)
+        self._decode_stride: int = 1
+
         if model_paths is not None:
             paths = dict(model_paths)
         else:
@@ -177,18 +186,31 @@ class TrafficPipeline:
             if config.is_model_file_usable(plate_path) and config.PLATE_MODEL_KEY not in paths:
                 paths[config.PLATE_MODEL_KEY] = plate_path
 
-        if not paths:
-            raise ValueError("At least one model path must be provided.")
+        zone_only = bool(self.enabled_rules & {"red_light", "no_parking"})
+        if not paths and not zone_only:
+            raise ValueError("At least one model path or zone rule must be provided.")
 
-        self.detector = MultiModelDetector(paths)
-        self.active_models: set[str] = set(self.detector.models.keys())
-        if not self.active_models:
-            raise RuntimeError("No YOLO models loaded. Check that selected .pt files exist and are valid.")
+        self.detector: Optional[MultiModelDetector] = None
+        if paths:
+            self.detector = MultiModelDetector(paths)
+            self.active_models: Set[str] = set(self.detector.models.keys())
+            if not self.active_models:
+                raise RuntimeError("No YOLO models loaded. Check that selected .pt files exist and are valid.")
+        else:
+            self.active_models = set()
 
-        self.use_truck = "truck" in self.active_models
-        self.use_triple = "triple" in self.active_models
-        self.use_helmet = "helmet" in self.active_models
-        self.use_plate = config.PLATE_MODEL_KEY in self.active_models
+        self.use_truck = "truck" in self.active_models and (
+            not self.enabled_rules or "truck_restricted" in self.enabled_rules
+        )
+        self.use_triple = "triple" in self.active_models and (
+            not self.enabled_rules or "triple" in self.enabled_rules
+        )
+        self.use_helmet = "helmet" in self.active_models and (
+            not self.enabled_rules or "helmet" in self.enabled_rules
+        )
+        self.use_plate = config.PLATE_MODEL_KEY in self.active_models and (
+            not self.enabled_rules or "plate_ocr" in self.enabled_rules
+        )
 
         self.truck_viol_start = (
             truck_violation_active_start_hour
@@ -207,7 +229,7 @@ class TrafficPipeline:
         )
         triple_semantics = None
         triple_allow_from_model: Optional[List[int]] = None
-        if self.use_triple and "triple" in self.detector.models:
+        if self.use_triple and self.detector and "triple" in self.detector.models:
             t_mdl = self.detector.models["triple"]
             t_names = getattr(t_mdl, "names", None)
             if len(getattr(config, "TRIPLE_VIOLATION_CLASS_IDS", [])) == 0:
@@ -216,7 +238,7 @@ class TrafficPipeline:
                     triple_allow_from_model = infer_triple_class_allowlist_from_yolo_names(t_names)
 
         helmet_viol_ids: Optional[Set[int]] = None
-        if self.use_helmet and "helmet" in self.detector.models:
+        if self.use_helmet and self.detector and "helmet" in self.detector.models:
             cfg_h = getattr(config, "HELMET_VIOLATION_CLASS_IDS", []) or []
             if len(cfg_h) > 0:
                 helmet_viol_ids = {int(x) for x in cfg_h}
@@ -258,7 +280,7 @@ class TrafficPipeline:
         self._cached_plate_dets: List[dict] = []
         # When dedicated plate YOLO is on, drop plate-like classes from truck/triple/etc. (same boxes from weaker head).
         self._aux_plate_class_ids_by_model: Dict[str, Set[int]] = {}
-        if self.use_plate:
+        if self.use_plate and self.detector:
             pk = config.PLATE_MODEL_KEY
             for mname, mdl in self.detector.models.items():
                 if mname == pk:
@@ -268,7 +290,7 @@ class TrafficPipeline:
                     self._aux_plate_class_ids_by_model[mname] = aux
 
         self._truck_class_allowlist: Optional[Set[int]] = None
-        if self.use_truck and "truck" in self.detector.models:
+        if self.use_truck and self.detector and "truck" in self.detector.models:
             cfg_ids = getattr(config, "TRUCK_CLASS_IDS", None)
             if cfg_ids is not None and len(cfg_ids) > 0:
                 self._truck_class_allowlist = {int(x) for x in cfg_ids}
@@ -278,6 +300,33 @@ class TrafficPipeline:
                 )
                 if inferred is not None:
                     self._truck_class_allowlist = set(inferred)
+
+        self._red_light_engine = None
+        self._no_parking_engine = None
+        self.models_loaded: List[str] = sorted(self.active_models)
+        if "red_light" in self.enabled_rules:
+            from modules.red_light.red_light_engine import RedLightPipelineEngine
+
+            self._red_light_engine = RedLightPipelineEngine(self.roi_config)
+            self.models_loaded.append("yolov10s")
+        if "no_parking" in self.enabled_rules:
+            from modules.no_parking.engine import NoParkingEngine
+
+            self._no_parking_engine = NoParkingEngine()
+            self.models_loaded.append("yolov8n")
+        self.engines_active: List[str] = []
+        if self.active_models:
+            self.engines_active.append("lane")
+        if self._red_light_engine:
+            self.engines_active.append("red_light")
+        if self._no_parking_engine:
+            self.engines_active.append("no_parking")
+
+    def configure_video_timing(self, fps: float, decode_stride: int = 1) -> None:
+        """Set source video fps/stride so zone engines use real elapsed seconds."""
+        self._source_fps = max(float(fps), 1e-6)
+        self._decode_stride = max(1, int(decode_stride))
+        _log.info("Pipeline ready models=%s engines=%s", self.models_loaded, self.engines_active)
 
     def _filter_truck_model_detections(self, dets: List[dict]) -> List[dict]:
         """Keep only truck-head boxes that match allowed class IDs and min confidence."""
@@ -506,6 +555,10 @@ class TrafficPipeline:
         3. Violation rules from detections (triple, helmet, truck restricted-time).
         4. EasyOCR **only** on ``_safe_crop(frame, plate_bbox)`` when the plate gate allows — never on the whole frame.
         """
+        self._unified_frame_idx = getattr(self, "_unified_frame_idx", 0) + 1
+        frame_idx = self._unified_frame_idx - 1
+        time_sec = (frame_idx * self._decode_stride) / self._source_fps
+
         now = self._now_for_truck_rules(reference_time)
         plate_key = config.PLATE_MODEL_KEY
         plate_every = max(1, int(getattr(config, "PLATE_YOLO_EVERY_N_FRAMES", 1)))
@@ -517,11 +570,14 @@ class TrafficPipeline:
             self._plate_yolo_frame_counter += 1
 
         # Violation / vehicle YOLO passes (all enabled models except plate).
-        detections = self.detector.infer(
-            frame,
-            skip_models=({plate_key} if self.use_plate else None) or None,
-        )
-        detections = self._filter_truck_model_detections(detections)
+        if self.detector is not None:
+            detections = self.detector.infer(
+                frame,
+                skip_models=({plate_key} if self.use_plate else None) or None,
+            )
+            detections = self._filter_truck_model_detections(detections)
+        else:
+            detections = []
 
         plate_infer_mode = "off"
         if self.use_plate:
@@ -856,6 +912,25 @@ class TrafficPipeline:
             "plate_yolo_boxes": len(plate_dets),
             "violation_snapshots": violation_snapshots,
             "helmet_rider_links": helmet_rider_links if self.use_helmet else [],
+            "models_loaded": list(self.models_loaded),
+            "engines_active": list(self.engines_active),
         }
+
+        engine_events: List[Dict[str, Any]] = []
+        if self._red_light_engine is not None:
+            frame, rl_events = self._red_light_engine.process_frame(frame, frame_idx, time_sec)
+            engine_events.extend(rl_events)
+        if self._no_parking_engine is not None:
+            zone = self.roi_config.get("no_parking_zone")
+            if zone:
+                frame, np_events = self._no_parking_engine.process_frame(
+                    frame, list(zone), frame_idx, time_sec
+                )
+                engine_events.extend(np_events)
+
+        if engine_events:
+            zone_lines = normalize_engine_events(engine_events)
+            violations = list(dict.fromkeys(list(violations or []) + zone_lines))
+            meta["engine_events"] = engine_events
 
         return frame, violations, meta
