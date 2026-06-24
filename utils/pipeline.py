@@ -20,6 +20,8 @@ from utils.violations import (
     TRIPLE_SEAT_VIOLATION_LABEL,
     ViolationManager,
     hour_in_half_open_window,
+    infer_helmet_present_class_ids,
+    infer_helmet_rider_class_ids,
     infer_helmet_violation_class_ids,
     infer_plate_like_class_ids_from_yolo_names,
     infer_truck_class_allowlist_from_yolo_names,
@@ -238,21 +240,31 @@ class TrafficPipeline:
                     triple_allow_from_model = infer_triple_class_allowlist_from_yolo_names(t_names)
 
         helmet_viol_ids: Optional[Set[int]] = None
+        helmet_present_ids: Optional[Set[int]] = None
+        helmet_rider_ids: Optional[Set[int]] = None
         if self.use_helmet and self.detector and "helmet" in self.detector.models:
+            h_names = getattr(self.detector.models["helmet"], "names", None)
             cfg_h = getattr(config, "HELMET_VIOLATION_CLASS_IDS", []) or []
             if len(cfg_h) > 0:
                 helmet_viol_ids = {int(x) for x in cfg_h}
             else:
-                inferred = infer_helmet_violation_class_ids(
-                    getattr(self.detector.models["helmet"], "names", None)
-                )
+                inferred = infer_helmet_violation_class_ids(h_names)
                 if inferred:
                     helmet_viol_ids = inferred
-                else:
-                    print(
-                        "[WARN] Helmet model loaded but no violation classes inferred; "
-                        "set HELMET_VIOLATION_CLASS_IDS in config.py (e.g. [2] for no_helmet)."
-                    )
+            # Classes used by the absence rule (rider without a confident helmet).
+            helmet_present_ids = infer_helmet_present_class_ids(h_names)
+            helmet_rider_ids = infer_helmet_rider_class_ids(h_names)
+            if not helmet_viol_ids and not (
+                bool(getattr(config, "HELMET_ABSENCE_RULE", True)) and helmet_rider_ids
+            ):
+                print(
+                    "[WARN] Helmet model loaded but no violation classes inferred and absence "
+                    "rule unavailable; set HELMET_VIOLATION_CLASS_IDS in config.py (e.g. [2])."
+                )
+
+        # Cached for crop-based helmet detection (which class id means violation / present).
+        self._helmet_viol_ids: Set[int] = set(helmet_viol_ids or [])
+        self._helmet_present_ids: Set[int] = set(helmet_present_ids or [])
 
         self._violation_snapshot_seen: Set[Tuple[Any, ...]] = set()
 
@@ -268,8 +280,22 @@ class TrafficPipeline:
             triple_class_allowlist=triple_allow_from_model,
             triple_semantics=triple_semantics,
             helmet_viol_class_ids=helmet_viol_ids,
+            helmet_present_class_ids=helmet_present_ids,
+            helmet_rider_class_ids=helmet_rider_ids,
         )
         self._ocr_reader = None
+        # Crop-based helmet detection (carrier detector loaded lazily on first frame).
+        self.use_helmet_crop = self.use_helmet and bool(
+            getattr(config, "HELMET_CROP_DETECTION", True)
+        )
+        self._carrier_model = None
+        # Per-rider tracking so each rider's no-helmet violation is counted once.
+        self._helmet_tracker = CentroidTracker(
+            max_disappeared=int(getattr(config, "HELMET_TRACK_MAX_DISAPPEARED", 30)),
+            max_distance=int(getattr(config, "HELMET_TRACK_MAX_DISTANCE", 120)),
+        )
+        self._helmet_track_state: Dict[int, Dict[str, Any]] = {}
+        self._helmet_new_violations: List[List[int]] = []
         self._plate_gate = (
             PlateOCRGate()
             if self.use_plate and bool(getattr(config, "PLATE_USE_TRACK_OCR_GATE", True))
@@ -525,8 +551,11 @@ class TrafficPipeline:
     def draw_detection(cls, frame, det):
         x1, y1, x2, y2 = det["bbox"]
         model_key = det["model"]
-        color = MODEL_DRAW_COLORS.get(model_key, DEFAULT_DRAW_COLOR)
-        label = f"{model_key} | cls:{det['class']} | {det['confidence']:.2f}"
+        color = det.get("color") or MODEL_DRAW_COLORS.get(model_key, DEFAULT_DRAW_COLOR)
+        if det.get("label"):
+            label = f"{det['label']} {det['confidence']:.2f}"
+        else:
+            label = f"{model_key} | cls:{det['class']} | {det['confidence']:.2f}"
 
         cv2.rectangle(frame, (x1, y1), (x2, y2), color, config.THICKNESS)
         cv2.putText(
@@ -538,6 +567,238 @@ class TrafficPipeline:
             color,
             config.THICKNESS,
         )
+
+    def _helmet_crop_detections(self, frame, *, immediate: bool = False) -> List[dict]:
+        """Crop-based, per-rider helmet decision.
+
+        Helmet checkpoints are trained on close-up riders and are very sensitive to
+        crop framing, so a single full-frame pass misses no-helmet riders. Instead we:
+          1. Find riders (COCO person on/over a two-wheeler; bikes alone as fallback).
+          2. Run the helmet model over a few crop variants of each rider's head region.
+          3. A rider is "helmeted" only if a *confident* "With Helmet" box appears.
+             Otherwise — explicit "Without Helmet", or no confident helmet at all
+             (the model mislabels/loses bare & capped heads) — it is a violation.
+
+        Returns synthetic helmet-model detections (violation / present) in full-frame
+        coordinates, anchored on each rider's head box.
+        """
+        if self.detector is None or "helmet" not in self.detector.models:
+            return []
+        if not self._helmet_viol_ids and not self._helmet_present_ids:
+            return []
+        if self._carrier_model is None:
+            try:
+                from ultralytics import YOLO
+
+                self._carrier_model = YOLO(getattr(config, "HELMET_CARRIER_MODEL_PATH"))
+            except Exception as e:  # pragma: no cover - load failure path
+                _log.warning("Helmet carrier model load failed (%s); crop detection off.", e)
+                self.use_helmet_crop = False
+                return []
+
+        hmodel = self.detector.models["helmet"]
+        H, W = frame.shape[:2]
+        carrier_ids = {int(x) for x in getattr(config, "HELMET_CARRIER_CLASS_IDS", [1, 3])}
+        c_conf = float(getattr(config, "HELMET_CARRIER_MIN_CONF", 0.30))
+        c_imgsz = int(getattr(config, "HELMET_CARRIER_IMGSZ", 960))
+        crop_imgsz = int(getattr(config, "HELMET_CROP_IMGSZ", 640))
+        crop_conf = float(getattr(config, "HELMET_CROP_CONF", 0.20))
+        present_th = float(getattr(config, "HELMET_CROP_PRESENT_CONF", 0.45))
+        viol_th = float(getattr(config, "HELMET_CROP_VIOL_CONF", 0.25))
+        absence_on = bool(getattr(config, "HELMET_CROP_ABSENCE", True))
+        absence_conf = float(getattr(config, "HELMET_CROP_ABSENCE_CONF", 0.60))
+        max_riders = int(getattr(config, "HELMET_CROP_MAX_RIDERS", 10))
+
+        try:
+            cres = self._carrier_model(frame, verbose=False, imgsz=c_imgsz)[0]
+        except Exception:
+            return []
+
+        merge_iou = float(getattr(config, "HELMET_RIDER_MERGE_IOU", 0.4))
+
+        def nms(boxes: List[List[int]], thr: float) -> List[List[int]]:
+            """Greedy NMS keeping the largest box first (one physical subject = one box)."""
+            order = sorted(
+                boxes,
+                key=lambda bx: (bx[2] - bx[0]) * (bx[3] - bx[1]),
+                reverse=True,
+            )
+            kept: List[List[int]] = []
+            for bx in order:
+                if all(_bbox_iou(bx, k) < thr for k in kept):
+                    kept.append(bx)
+            return kept
+
+        persons: List[List[int]] = []
+        bikes: List[List[int]] = []
+        if cres.boxes is not None:
+            for b in cres.boxes:
+                cid = int(b.cls[0])
+                if float(b.conf[0]) < c_conf:
+                    continue
+                box = [int(v) for v in b.xyxy[0].tolist()]
+                if cid == 0:
+                    persons.append(box)
+                elif cid in carrier_ids:
+                    bikes.append(box)
+
+        # Merge overlapping detections so one bike / one person is not split into several.
+        bikes = nms(bikes, 0.5)
+        persons = nms(persons, 0.6)
+
+        # Build rider boxes: persons sitting on / over a two-wheeler.
+        riders: List[List[int]] = []
+        matched_bikes: Set[int] = set()
+        for p in persons:
+            pcx = (p[0] + p[2]) // 2
+            for bi, bk in enumerate(bikes):
+                # rider centre within bike span and feet near/over the bike top
+                if bk[0] - 20 <= pcx <= bk[2] + 20 and p[3] >= bk[1] - 20:
+                    riders.append(p)
+                    matched_bikes.add(bi)
+                    break
+        # Bikes with no matched person: synthesise a rider region above the seat.
+        for bi, bk in enumerate(bikes):
+            if bi in matched_bikes:
+                continue
+            bh = max(1, bk[3] - bk[1])
+            riders.append([bk[0], max(0, bk[1] - int(bh * 1.1)), bk[2], bk[1] + int(bh * 0.2)])
+
+        # Final merge so a person box and an overlapping synthesised bike-rider collapse to one.
+        riders = nms(riders, merge_iou)[:max_riders]
+        out: List[dict] = []
+        self._helmet_new_violations = []
+
+        def run_crop(cx1: int, cy1: int, cx2: int, cy2: int):
+            cx1, cy1 = max(0, cx1), max(0, cy1)
+            cx2, cy2 = min(W, cx2), min(H, cy2)
+            crop = frame[cy1:cy2, cx1:cx2]
+            if crop.size == 0 or crop.shape[0] < 12 or crop.shape[1] < 12:
+                return 0.0, 0.0
+            try:
+                r = hmodel(crop, verbose=False, imgsz=crop_imgsz, conf=crop_conf)[0]
+            except Exception:
+                return 0.0, 0.0
+            withc = woc = 0.0
+            if r.boxes is not None:
+                for b in r.boxes:
+                    cls_id = int(b.cls[0])
+                    cf = float(b.conf[0])
+                    if cls_id in self._helmet_present_ids:
+                        withc = max(withc, cf)
+                    elif cls_id in self._helmet_viol_ids:
+                        woc = max(woc, cf)
+            return withc, woc
+
+        # First pass: per-frame raw helmet evidence for each rider.
+        decisions: List[Dict[str, Any]] = []
+        for r in riders:
+            x1, y1, x2, y2 = r
+            w, h = max(1, x2 - x1), max(1, y2 - y1)
+            # Head box = top portion of the rider box (used for drawing / association).
+            head = [x1, y1, x2, y1 + int(h * 0.5)]
+            best_with = best_woc = 0.0
+            # Ensemble of crop variants around the rider's upper body / head.
+            for head_frac, pad in ((0.5, 0.05), (0.65, 0.18), (0.85, 0.3)):
+                cw, cwo = run_crop(
+                    int(x1 - w * pad),
+                    int(y1 - h * 0.12),
+                    int(x2 + w * pad),
+                    y1 + int(h * head_frac),
+                )
+                best_with = max(best_with, cw)
+                best_woc = max(best_woc, cwo)
+            decisions.append(
+                {"rider": [int(v) for v in r], "head": head, "w": best_with, "wo": best_woc}
+            )
+
+        # Track riders so we can smooth the decision over time. The helmet model is very
+        # noisy frame-to-frame, so we keep an EMA of evidence per rider and apply
+        # hysteresis: once a rider is judged helmeted / not, it only flips when the
+        # opposite evidence is clearly stronger. This stops the box from flickering back
+        # to a false positive a few frames after a correct call.
+        rider_rects = [tuple(d["rider"]) for d in decisions]
+        tracked = self._helmet_tracker.update(rider_rects)
+        rect_to_id: Dict[Tuple[int, int, int, int], int] = {}
+        for tid, rect in tracked.items():
+            rect_to_id.setdefault(tuple(int(v) for v in rect), tid)
+        live_ids = set(tracked.keys())
+        self._helmet_track_state = {
+            k: v for k, v in self._helmet_track_state.items() if k in live_ids
+        }
+
+        alpha = float(getattr(config, "HELMET_STATUS_EMA_ALPHA", 0.45))
+        flip = float(getattr(config, "HELMET_STATUS_FLIP_MARGIN", 0.18))
+        confirm_frames = 1 if immediate else max(1, int(getattr(config, "HELMET_CONFIRM_FRAMES", 3)))
+
+        for d in decisions:
+            head = d["head"]
+            tid = rect_to_id.get(tuple(d["rider"]))
+            if tid is None:
+                continue
+            new_track = tid not in self._helmet_track_state
+            st = self._helmet_track_state.setdefault(
+                tid, {"counted": False, "w": 0.0, "wo": 0.0, "status": "unknown", "n": 0}
+            )
+            st["n"] += 1
+            # Smooth evidence over time (seed EMA with the first observation so the
+            # warm-up frame is not artificially weak).
+            if new_track:
+                st["w"], st["wo"] = d["w"], d["wo"]
+            else:
+                st["w"] = alpha * d["w"] + (1 - alpha) * st["w"]
+                st["wo"] = alpha * d["wo"] + (1 - alpha) * st["wo"]
+            sw, swo = st["w"], st["wo"]
+
+            # Candidate status from smoothed evidence.
+            if swo >= viol_th and swo >= sw:
+                cand = "no_helmet"
+            elif sw >= present_th and sw >= swo:
+                cand = "helmet"
+            elif absence_on:
+                cand = "no_helmet"
+            else:
+                cand = "unknown"
+
+            # Hysteresis: do not abandon a settled status without clearly stronger evidence.
+            prev = st["status"]
+            if prev == "no_helmet" and cand != "no_helmet":
+                if not (sw >= present_th + flip and sw > swo + flip):
+                    cand = "no_helmet"
+            elif prev == "helmet" and cand != "helmet":
+                if not (swo >= viol_th + flip and swo > sw + flip):
+                    cand = "helmet"
+            st["status"] = cand
+
+            if cand == "helmet" and self._helmet_present_ids:
+                out.append(
+                    {
+                        "model": "helmet",
+                        "class": next(iter(self._helmet_present_ids)),
+                        "confidence": max(sw, present_th),
+                        "bbox": head,
+                        "label": "HELMET",
+                        "color": (0, 180, 0),
+                    }
+                )
+            elif cand == "no_helmet" and self._helmet_viol_ids:
+                conf = max(swo, absence_conf, float(getattr(config, "HELMET_MIN_CONFIDENCE", 0.35)))
+                out.append(
+                    {
+                        "model": "helmet",
+                        "class": next(iter(self._helmet_viol_ids)),
+                        "confidence": conf,
+                        "bbox": head,
+                        "label": "NO HELMET",
+                        "color": (0, 0, 255),
+                    }
+                )
+                # Only count once the rider has persisted long enough to rule out a
+                # one-frame false positive.
+                if not st["counted"] and st["n"] >= confirm_frames:
+                    st["counted"] = True
+                    self._helmet_new_violations.append(list(head))
+        return out
 
     def process_frame(
         self,
@@ -571,11 +832,20 @@ class TrafficPipeline:
 
         # Violation / vehicle YOLO passes (all enabled models except plate).
         if self.detector is not None:
-            detections = self.detector.infer(
-                frame,
-                skip_models=({plate_key} if self.use_plate else None) or None,
-            )
+            skip: Set[str] = set()
+            if self.use_plate:
+                skip.add(plate_key)
+            # In crop mode the helmet model is run per-rider-crop below, not full-frame.
+            if self.use_helmet_crop:
+                skip.add("helmet")
+            detections = self.detector.infer(frame, skip_models=skip or None)
             detections = self._filter_truck_model_detections(detections)
+            if self.use_helmet_crop:
+                detections.extend(
+                    self._helmet_crop_detections(
+                        frame, immediate=bool(force_immediate_plate_ocr or force_full_frame_plate)
+                    )
+                )
         else:
             detections = []
 
@@ -769,7 +1039,13 @@ class TrafficPipeline:
         helmet_bbox_queue: deque = deque()
         h_pairs: List[Tuple[str, List[int]]] = []
         if self.use_helmet:
-            h_pairs = self.violation_manager.check_helmet_violation_pairs(detections_for_rules)
+            if self.use_helmet_crop:
+                # Crop path already decided + tracked riders; each fires once per rider.
+                h_pairs = [
+                    (HELMET_VIOLATION_LABEL, list(b)) for b in self._helmet_new_violations
+                ]
+            else:
+                h_pairs = self.violation_manager.check_helmet_violation_pairs(detections_for_rules)
             viol_raw.extend(m for m, _ in h_pairs)
             for _, b in h_pairs:
                 helmet_bbox_queue.append(b)

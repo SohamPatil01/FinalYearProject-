@@ -9,7 +9,6 @@ OCR attempts are gated by quality + stability so we do not OCR blurry or jumping
 from __future__ import annotations
 
 import math
-from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import cv2
@@ -116,6 +115,11 @@ class PlateOCRGate:
         stable_need = int(getattr(config, "PLATE_OCR_STABLE_FRAMES", 4))
         drift = float(getattr(config, "PLATE_OCR_MAX_CENTROID_DRIFT", 14.0))
         min_chars = int(getattr(config, "PLATE_OCR_MIN_TEXT_LEN", 4))
+        # Confirm a plate by agreement across reads (accuracy), but lock instantly on a
+        # high-confidence single read (keeps lock-on fast for clear plates).
+        confirm_reads = max(1, int(getattr(config, "PLATE_OCR_CONFIRM_READS", 2)))
+        single_lock_conf = float(getattr(config, "PLATE_OCR_SINGLE_LOCK_CONF", 0.80))
+        min_accept_conf = float(getattr(config, "PLATE_OCR_MIN_ACCEPT_CONF", 0.0))
         allow_upgrade = bool(getattr(config, "PLATE_OCR_ALLOW_UPGRADE", False))
         upgrade_ratio = float(getattr(config, "PLATE_OCR_UPGRADE_QUALITY_RATIO", 1.12))
         retry_gap = int(getattr(config, "PLATE_OCR_RETRY_MIN_FRAMES", 6))
@@ -138,6 +142,9 @@ class PlateOCRGate:
                     "last_c": None,
                     "text": "",
                     "text_hist": [],
+                    "votes": {},
+                    "vote_conf": {},
+                    "read_count": 0,
                     "ocr_conf": 0.0,
                     "has_ocr": False,
                     "best_quality": 0.0,
@@ -220,19 +227,32 @@ class PlateOCRGate:
                         m["ocr_fail_count"] = int(m.get("ocr_fail_count", 0)) + 1
                         return
                     txt, ocf = read_plate_from_crop(rdr, crop)
-                    if txt and len(txt) >= min_chars:
+                    if txt and len(txt) >= min_chars and float(ocf) >= min_accept_conf:
+                        # Confidence-weighted voting across reads of the same track.
+                        # The winning text is the one with the highest accumulated
+                        # confidence, which corrects single-frame OCR mistakes.
+                        m["read_count"] = int(m.get("read_count", 0)) + 1
+                        votes = m.setdefault("votes", {})
+                        vote_conf = m.setdefault("vote_conf", {})
+                        votes[txt] = float(votes.get(txt, 0.0)) + max(0.05, float(ocf))
+                        vote_conf[txt] = max(float(vote_conf.get(txt, 0.0)), float(ocf))
+
                         hist_n = max(3, int(getattr(config, "PLATE_TEXT_STABILIZE_WINDOW", 7)))
                         hist = list(m.get("text_hist", []))
                         hist.append(str(txt))
                         if len(hist) > hist_n:
                             hist = hist[-hist_n:]
                         m["text_hist"] = hist
-                        m["text"] = Counter(hist).most_common(1)[0][0]
-                        m["ocr_conf"] = ocf
-                        m["has_ocr"] = True
-                        m["best_quality"] = quality
+
+                        winner = max(votes.items(), key=lambda kv: kv[1])[0]
+                        m["text"] = winner
+                        m["ocr_conf"] = float(vote_conf.get(winner, ocf))
+                        m["best_quality"] = max(float(m.get("best_quality", 0.0)), quality)
                         m["ocr_error"] = False
                         m["ocr_fail_count"] = 0
+                        # Lock once confirmed by enough reads, or on a strong single read.
+                        if int(m["read_count"]) >= confirm_reads or float(ocf) >= single_lock_conf:
+                            m["has_ocr"] = True
                     else:
                         m["ocr_fail_count"] = int(m.get("ocr_fail_count", 0)) + 1
                 except Exception:

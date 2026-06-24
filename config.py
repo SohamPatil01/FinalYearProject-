@@ -9,8 +9,9 @@ MODELS_DIR = BASE_DIR / "models"
 
 # Truck YOLO weights (`models/truck.pt`).
 TRUCK_MODEL_PATH = str(MODELS_DIR / "truck.pt")
-# Helmet / rider checkpoint (e.g. helmet, motorcycle, no_helmet, rider).
-HELMET_MODEL_PATH = str(MODELS_DIR / "helmet.pt")
+# Helmet / rider checkpoint. ``helmet_best.pt`` is a 2-class (With/Without Helmet) model
+# trained on close-up rider crops; see HELMET_CROP_DETECTION below for how it is fed.
+HELMET_MODEL_PATH = str(MODELS_DIR / "helmet_best.pt")
 
 # Video source:
 # - 0 for webcam
@@ -92,7 +93,8 @@ YOLO_HALF_PRECISION: bool = True
 # Run plate **detector** YOLO every N processed frames (1 = every frame). Cached boxes between runs still get OCR on crops when gates pass.
 PLATE_YOLO_EVERY_N_FRAMES: int = 2 or 3
 # Drop dedicated plate-head boxes below this conf before tracking/OCR (reduces flicker and bad crops).
-PLATE_YOLO_MIN_CONF: float = 0.28
+# Raised to reject the weak detector's false-positive boxes ("anything looks like a plate").
+PLATE_YOLO_MIN_CONF: float = 0.5
 # Expand each raw YOLO plate box by this fraction of its width/height before OCR (captures plate edges).
 PLATE_BBOX_EXPAND_FRAC: float = 0.12
 # When expansion > 0, draw the raw YOLO box (thin) inside the expanded OCR box (thick) on the video.
@@ -107,7 +109,7 @@ PLATE_TRACK_MAX_DISTANCE: int = 95
 PLATE_TRACK_MAX_DISAPPEARED: int = 22
 # EMA on plate box per track (0 = off). Smooths jitter between YOLO refreshes for steadier crops and reads.
 PLATE_BBOX_SMOOTH_ALPHA: float = 0.42
-PLATE_OCR_MIN_YOLO_CONF: float = 0.5
+PLATE_OCR_MIN_YOLO_CONF: float = 0.6
 PLATE_OCR_MIN_AREA: int = 2000
 # width/height; include portrait-ish / square plate boxes (truck fronts, angles).
 PLATE_OCR_MIN_ASPECT: float = 0.35
@@ -118,25 +120,35 @@ PLATE_OCR_MIN_SHARPNESS: float = 35.0
 # If aspect/area fails but Laplacian sharpness reaches this, still allow OCR (stable + YOLO ok).
 PLATE_OCR_BYPASS_GEOM_SHARPNESS: float = 120.0
 # Require this many stable frames before OCR — plate YOLO still runs every frame; EasyOCR waits until the box settles.
-PLATE_OCR_STABLE_FRAMES: int = 4
+PLATE_OCR_STABLE_FRAMES: int = 3
 PLATE_OCR_MAX_CENTROID_DRIFT: float = 20.0
 PLATE_OCR_MIN_TEXT_LEN: int = 4
+# Confirm a plate read by agreement across this many OCR reads (confidence-weighted vote)
+# before locking it — corrects single-frame OCR mistakes. Set to 1 to lock on the first read.
+PLATE_OCR_CONFIRM_READS: int = 2
+# A single read at/above this OCR confidence locks immediately (skips the confirm vote),
+# so clearly-readable plates still lock fast.
+PLATE_OCR_SINGLE_LOCK_CONF: float = 0.80
+# Ignore OCR reads below this confidence — stops junk crops from locking garbage text.
+PLATE_OCR_MIN_ACCEPT_CONF: float = 0.35
 # When False, EasyOCR runs at most once per track after gates pass (best for video throughput + stable read).
 PLATE_OCR_ALLOW_UPGRADE: bool = False
 PLATE_OCR_UPGRADE_QUALITY_RATIO: float = 1.25
 # Minimum frames between OCR attempts while plate still has no valid read (higher = less CPU churn).
-PLATE_OCR_RETRY_MIN_FRAMES: int = 56
+# Low enough to collect a couple of confirm-vote reads, high enough to avoid CPU stalls.
+PLATE_OCR_RETRY_MIN_FRAMES: int = 10
 # Stop retrying a no-text plate track after this many failed OCR attempts.
-# (Successful OCR resets this naturally because `has_ocr=True`.)
-PLATE_OCR_MAX_TRIES_PER_TRACK: int = 2
+# (Successful OCR resets this naturally.)
+PLATE_OCR_MAX_TRIES_PER_TRACK: int = 4
 # If True, each track gets only one OCR attempt (no continuous background retries).
-PLATE_OCR_ONE_SHOT_PER_TRACK: bool = True
+# False enables the multi-read confirm vote (see PLATE_OCR_CONFIRM_READS) for better accuracy.
+PLATE_OCR_ONE_SHOT_PER_TRACK: bool = False
 # Limit OCR calls per processed frame to avoid random multi-second stalls when multiple tracks gate-pass together.
 # 1 = smoothest timeline. Increase to 2 only if you need faster lock-on for many simultaneous plates.
 PLATE_OCR_MAX_TRIES_PER_FRAME: int = 1
 # Optional throttle: only *attempt* OCR on every Nth pipeline frame (still **plate crops only**; plate YOLO runs every frame).
 # Higher = less EasyOCR load and less UI lag. First stable read can bypass stride (see PLATE_OCR_SKIP_STRIDE_ON_STABLE_EDGE).
-PLATE_OCR_ATTEMPT_EVERY_N_FRAMES: int = 8
+PLATE_OCR_ATTEMPT_EVERY_N_FRAMES: int = 6
 # If True, the first OCR try for a track fires on the first frame where quality+stability gates pass, without waiting for the stride counter.
 PLATE_OCR_SKIP_STRIDE_ON_STABLE_EDGE: bool = True
 # Plate text stabilization window size (majority vote over last N successful OCR reads per track).
@@ -154,6 +166,8 @@ PLATE_OCR_PREPROCESS_MIN_SIDE: int = 140
 # Extra border around YOLO crop before OCR (fraction of min side) — reduces clipped characters.
 PLATE_OCR_INNER_PAD_FRAC: float = 0.10
 # Multiple preprocess views per OCR attempt — accurate but slower; False cuts lag a lot.
+# Off by default: the cross-frame confirm-vote already improves accuracy without the 3x CPU cost
+# (this was the main cause of the mid-run video stalls).
 PLATE_OCR_MULTI_VARIANT: bool = False
 PLATE_OCR_MAX_VARIANTS: int = 2
 # Recognition: beam search is slower but usually more accurate on plate strings than greedy.
@@ -294,6 +308,52 @@ HELMET_MERGE_IOU: float = 0.45
 # Same idea as triple streak: require this many consecutive frames in the same screen cell (1 = immediate).
 HELMET_MIN_CONSECUTIVE_FRAMES: int = 1
 HELMET_STREAK_CELL_PX: int = 64
+
+# --- Absence-based helmet rule -------------------------------------------------
+# Many helmet checkpoints (incl. the bundled yolov8n one) mislabel bare/capped heads
+# as "helmet", so the `no_helmet` class rarely fires. When this is on, a rider/
+# motorcycle that has NO sufficiently confident "helmet" box over its head region is
+# flagged as a no-helmet violation — even if the model never emits a `no_helmet` box.
+HELMET_ABSENCE_RULE: bool = True
+# A "helmet" detection must be at least this confident to count as "this rider has a helmet".
+# Keep relatively high so weak/false helmet boxes on bare heads do not suppress the violation.
+HELMET_PRESENT_MIN_CONF: float = 0.55
+# A rider/motorcycle box must be at least this confident to be considered a carrier needing a helmet.
+HELMET_RIDER_MIN_CONF: float = 0.35
+# Fraction of the rider box height (from the top) treated as the head region for helmet coverage.
+HELMET_HEAD_REGION_FRAC: float = 0.45
+
+# --- Crop-based helmet detection ----------------------------------------------
+# Helmet checkpoints are trained on close-up riders, so running them on a full wide
+# frame misses small/distant heads. When on, a carrier detector (COCO) locates
+# motorcycles/bicycles, and the helmet model runs on each expanded rider crop (where
+# the head is large), then results are mapped back to frame coordinates.
+HELMET_CROP_DETECTION: bool = True
+HELMET_CARRIER_MODEL_PATH = str(MODELS_DIR / "yolov8n.pt")
+HELMET_CARRIER_CLASS_IDS: List[int] = [1, 3]  # COCO: bicycle, motorcycle
+HELMET_CARRIER_MIN_CONF: float = 0.30
+HELMET_CARRIER_IMGSZ: int = 960
+HELMET_CROP_PAD_FRAC: float = 0.25       # widen carrier box before cropping
+HELMET_CROP_TOP_EXTEND_FRAC: float = 0.7  # extend upward to include the rider's head/torso
+HELMET_CROP_IMGSZ: int = 640
+HELMET_CROP_CONF: float = 0.20  # low: the per-crop run is only a signal source
+
+# Per-rider decision (ensemble of crop variants).
+# A rider counts as helmeted only if a "With Helmet" box reaches this confidence;
+# otherwise (explicit "Without Helmet", OR no confident helmet at all) it's a violation.
+HELMET_CROP_PRESENT_CONF: float = 0.45   # confidently helmeted -> no violation
+HELMET_CROP_VIOL_CONF: float = 0.25      # explicit "Without Helmet" signal
+HELMET_CROP_ABSENCE: bool = True         # flag riders with no confident helmet
+HELMET_CROP_ABSENCE_CONF: float = 0.60   # confidence stamped on absence violations
+HELMET_CROP_MAX_RIDERS: int = 10         # cap per frame (cost control)
+# Per-rider tracking: each tracked rider is counted at most once.
+HELMET_TRACK_MAX_DISAPPEARED: int = 30   # frames a rider can vanish before its id is dropped
+HELMET_TRACK_MAX_DISTANCE: int = 120     # px centroid distance to keep the same rider id
+HELMET_RIDER_MERGE_IOU: float = 0.4      # merge overlapping rider/bike boxes (one rider = one track)
+# Temporal stabilisation (the helmet model is noisy frame-to-frame).
+HELMET_STATUS_EMA_ALPHA: float = 0.45    # weight of the newest frame in the running evidence
+HELMET_STATUS_FLIP_MARGIN: float = 0.18  # extra evidence needed to flip a settled decision
+HELMET_CONFIRM_FRAMES: int = 3           # frames a rider must persist before its violation counts
 
 # Separate “restricted hours” for the truck-only rule (used only if TRUCK_RESTRICTED_MATCH_VIOLATION_WINDOW is False).
 TRUCK_RESTRICTED_START_HOUR = 7

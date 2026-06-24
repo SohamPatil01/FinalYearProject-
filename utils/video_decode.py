@@ -16,8 +16,33 @@ import cv2
 import numpy as np
 
 import config
+from utils.faststart import remux_faststart
 from utils.pipeline import TrafficPipeline
 from utils.ui_common import append_plate_capture_from_frame
+
+
+def _open_video_writer(out_path: Path, fps: float, size) -> "cv2.VideoWriter":
+    """Create a writer, preferring H.264 (avc1) for reliable browser playback.
+
+    Falls back to mp4v if the H.264 encoder is unavailable in this OpenCV build.
+    """
+    for codec in ("avc1", "mp4v"):
+        writer = cv2.VideoWriter(str(out_path), cv2.VideoWriter_fourcc(*codec), fps, size)
+        if writer.isOpened():
+            return writer
+        writer.release()
+    raise RuntimeError("Could not create output video writer")
+
+
+def _finalize_mp4(out_path: Optional[Path]) -> None:
+    """Make the written MP4 web-streamable (moov atom moved to the front)."""
+    if out_path is None:
+        return
+    try:
+        remux_faststart(out_path)
+    except Exception:
+        # Faststart is an optimization; never fail the run because of it.
+        pass
 
 
 # Suffixes OpenCV / Pillow can load as a single still frame (not a video container).
@@ -99,11 +124,11 @@ def iter_decode_video(
     if write_annotated_mp4:
         if out_path is None:
             raise ValueError("out_path is required when write_annotated_mp4 is True")
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(out_path), fourcc, out_fps, (w, h))
-        if not writer.isOpened():
+        try:
+            writer = _open_video_writer(out_path, out_fps, (w, h))
+        except RuntimeError:
             cap.release()
-            raise RuntimeError("Could not create output video writer")
+            raise
 
     captures: List[Dict[str, Any]] = []
     seen: set = set()
@@ -164,6 +189,7 @@ def iter_decode_video(
         cap.release()
         if writer is not None:
             writer.release()
+            _finalize_mp4(out_path)
 
     if frame_idx > 0 and src_total <= 0:
         est_decoded = frame_idx
@@ -205,10 +231,7 @@ def iter_decode_image(
     if write_annotated_mp4:
         if out_path is None:
             raise ValueError("out_path is required when write_annotated_mp4 is True")
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-        writer = cv2.VideoWriter(str(out_path), fourcc, 1.0, (w, h))
-        if not writer.isOpened():
-            raise RuntimeError("Could not create output video writer")
+        writer = _open_video_writer(out_path, 1.0, (w, h))
 
     captures: List[Dict[str, Any]] = []
     seen: set = set()
@@ -241,6 +264,7 @@ def iter_decode_image(
         writer.write(processed)
         writer.release()
         writer = None
+        _finalize_mp4(out_path)
 
     last_bgr = processed
     yield {

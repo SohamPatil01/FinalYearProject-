@@ -193,6 +193,45 @@ def infer_helmet_violation_class_ids(names) -> set[int]:
     return {i for i, n in idx.items() if _without_helmet_class_name(n)}
 
 
+def _present_helmet_class_name(name: str) -> bool:
+    """True if the class denotes a *worn* helmet (``helmet``/``with_helmet``/``helmeted``)."""
+    n = name.lower().replace(" ", "_").replace("-", "_")
+    if _without_helmet_class_name(name):  # exclude no_helmet / without_helmet
+        return False
+    return "helmet" in n
+
+
+def _rider_carrier_class_name(name: str) -> bool:
+    """True if the class denotes a rider / two-wheeler that should be wearing a helmet."""
+    n = name.lower().replace(" ", "_").replace("-", "_")
+    if "helmet" in n:  # helmet / no_helmet are head classes, not carriers
+        return False
+    if n in (
+        "rider",
+        "motorcycle",
+        "motorbike",
+        "bike",
+        "scooter",
+        "motorcyclist",
+        "two_wheeler",
+        "person",
+    ):
+        return True
+    return n.endswith("_rider") or n.endswith("_motorcycle")
+
+
+def infer_helmet_present_class_ids(names) -> set[int]:
+    """Class indices on the helmet checkpoint that denote a worn helmet."""
+    idx = _normalize_yolo_names(names)
+    return {i for i, n in idx.items() if _present_helmet_class_name(n)}
+
+
+def infer_helmet_rider_class_ids(names) -> set[int]:
+    """Class indices on the helmet checkpoint that denote a rider/two-wheeler carrier."""
+    idx = _normalize_yolo_names(names)
+    return {i for i, n in idx.items() if _rider_carrier_class_name(n)}
+
+
 def infer_plate_like_class_ids_from_yolo_names(names) -> set[int]:
     """Class indices whose names look like plates — stripped from truck/triple outputs when plate.pt is on.
 
@@ -351,6 +390,8 @@ class ViolationManager:
         triple_class_allowlist: Optional[List[int]] = None,
         triple_semantics: Optional[Dict[str, Any]] = None,
         helmet_viol_class_ids: Optional[Set[int]] = None,
+        helmet_present_class_ids: Optional[Set[int]] = None,
+        helmet_rider_class_ids: Optional[Set[int]] = None,
     ) -> None:
         self.truck_restricted_start = truck_restricted_start
         self.truck_restricted_end = truck_restricted_end
@@ -360,6 +401,9 @@ class ViolationManager:
         self.triple_semantics: Optional[Dict[str, Any]] = triple_semantics
         # Class IDs on helmet model that mean "no helmet" (empty set / None → no helmet rule)
         self.helmet_viol_class_ids: Set[int] = set(helmet_viol_class_ids or [])
+        # Class IDs that mean a worn helmet, and rider/carrier classes (for the absence rule).
+        self.helmet_present_class_ids: Set[int] = set(helmet_present_class_ids or [])
+        self.helmet_rider_class_ids: Set[int] = set(helmet_rider_class_ids or [])
 
         # (cell_x, cell_y) -> consecutive frames with a triple candidate in that cell
         self._triple_cell_streak: Dict[Tuple[int, int], int] = {}
@@ -545,13 +589,20 @@ class ViolationManager:
 
     def check_helmet_violation_pairs(self, detections: List[dict]) -> List[Tuple[str, List[int]]]:
         """
-        Flag **no-helmet** class detections from the helmet YOLO head.
+        Flag no-helmet violations from the helmet YOLO head.
 
-        Other classes (``helmet``, ``motorcycle``, ``rider``, …) are drawn for context but only
-        configured violation classes emit `HELMET_VIOLATION_LABEL`.
+        Two complementary signals:
+        1. **Explicit** — detections whose class is a ``no_helmet``-style class.
+        2. **Absence** (``HELMET_ABSENCE_RULE``) — a rider / two-wheeler box with no
+           sufficiently confident ``helmet`` box over its head region. This catches the
+           common failure where the model mislabels a bare head as ``helmet`` and never
+           emits ``no_helmet``, so the explicit signal alone would miss the violation.
         """
         viol_ids = self.helmet_viol_class_ids
-        if not viol_ids:
+        absence_on = bool(getattr(config, "HELMET_ABSENCE_RULE", True)) and bool(
+            self.helmet_rider_class_ids
+        )
+        if not viol_ids and not absence_on:
             return []
 
         min_conf = float(getattr(config, "HELMET_MIN_CONFIDENCE", 0.35))
@@ -559,15 +610,48 @@ class ViolationManager:
         min_streak = max(1, int(getattr(config, "HELMET_MIN_CONSECUTIVE_FRAMES", 1)))
         cell_px = max(16, int(getattr(config, "HELMET_STREAK_CELL_PX", 64)))
 
+        helmet_dets = [d for d in detections if d.get("model") == "helmet"]
+
         candidates: List[dict] = []
-        for det in detections:
-            if det.get("model") != "helmet":
+        # 1) Explicit no_helmet class detections.
+        for det in helmet_dets:
+            if int(det.get("class", -1)) not in viol_ids:
                 continue
             if float(det.get("confidence", 0.0)) < min_conf:
                 continue
-            if int(det.get("class", -1)) not in viol_ids:
-                continue
             candidates.append(det)
+
+        # 2) Absence rule: rider without a confident helmet over the head region.
+        if absence_on:
+            present_conf = float(getattr(config, "HELMET_PRESENT_MIN_CONF", 0.55))
+            rider_conf = float(getattr(config, "HELMET_RIDER_MIN_CONF", 0.35))
+            head_frac = float(getattr(config, "HELMET_HEAD_REGION_FRAC", 0.45))
+            helmet_boxes = [
+                d["bbox"]
+                for d in helmet_dets
+                if int(d.get("class", -1)) in self.helmet_present_class_ids
+                and float(d.get("confidence", 0.0)) >= present_conf
+            ]
+            riders = [
+                d
+                for d in helmet_dets
+                if int(d.get("class", -1)) in self.helmet_rider_class_ids
+                and float(d.get("confidence", 0.0)) >= rider_conf
+            ]
+            riders = _nms_by_iou(riders, 0.5)
+            for r in riders:
+                x1, y1, x2, y2 = r["bbox"]
+                head = [x1, y1, x2, int(y1 + (y2 - y1) * head_frac)]
+                hcx, hcy = (head[0] + head[2]) // 2, (head[1] + head[3]) // 2
+                covered = False
+                for hb in helmet_boxes:
+                    if _iou(head, hb) > 0.05 or _point_in_bbox(
+                        ((hb[0] + hb[2]) // 2, (hb[1] + hb[3]) // 2), self._expand_bbox(head, 0.3)
+                    ) or _point_in_bbox((hcx, hcy), hb):
+                        covered = True
+                        break
+                if not covered:
+                    candidates.append({"bbox": head, "confidence": float(r.get("confidence", 0.0))})
 
         merged = _nms_by_iou(candidates, merge_iou)
 

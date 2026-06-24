@@ -1,0 +1,194 @@
+/* ============================================================
+   VioLane — section system (§ datasheet sections) + layout
+   ============================================================ */
+.vl-screen { margin-bottom: var(--space-section); }
+.vl-screen--enter { animation: vlFadeUp 0.5s var(--ease-out) both; }
+
+.screen-panel {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.screen-panel__inner,
+.vl-screen__inner {
+  padding: clamp(1.5rem, 4vw, 2.75rem);
+}
+
+/* Two-column hero/datasheet split */
+.vl-split {
+  display: grid;
+  grid-template-columns: 1.05fr 0.95fr;
+  gap: clamp(1.5rem, 4vw, 3rem);
+  align-items: center;
+}
+@media (max-width: 860px) {
+  .vl-split { grid-template-columns: 1fr; }
+}
+
+/* Section header bits */
+.vl-screen-kicker {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 1rem;
+}
+.vl-screen-title {
+  font-weight: 700;
+  font-size: clamp(1.7rem, 4.2vw, 2.6rem);
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+  color: var(--text);
+  margin: 0 0 0.85rem;
+}
+.vl-screen-title .accent { color: var(--accent); }
+.vl-screen-lead {
+  font-size: 0.96rem;
+  line-height: 1.6;
+  color: var(--muted);
+  margin: 0 0 1.5rem;
+  max-width: 38rem;
+}
+
+/* Eyebrow chip row */
+.vl-hook-row { display: flex; flex-wrap: wrap; gap: 0.6rem; margin-bottom: 1.1rem; }
+.vl-hook-badge {
+  display: inline-flex; align-items: center; gap: 0.45rem;
+  font-family: var(--mono);
+  font-size: 0.62rem; font-weight: 600;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  padding: 0.4rem 0.7rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(194, 105, 63, 0.3);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+.vl-hook-badge .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--teal);
+}
+
+.file-recap { font-size: 0.86rem; color: var(--muted); margin: 0 0 1.25rem; line-height: 1.5; }
+.file-recap strong { color: var(--text); }
+
+.btn-row-spaced {
+  margin-top: 1.75rem;
+  display: flex; justify-content: flex-end; gap: 0.75rem; flex-wrap: wrap;
+}
+
+/* ---- Console embed (the dark "router.console" nod, recolored warm) ---- */
+.vl-console {
+  border-radius: var(--radius);
+  background: var(--bg-ink);
+  border: 1px solid var(--border-ink);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  font-family: var(--mono);
+  color: var(--text-on-ink);
+}
+.vl-console__bar {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.6rem 0.85rem;
+  border-bottom: 1px solid var(--border-ink);
+  font-size: 0.68rem;
+  color: rgba(243, 239, 231, 0.6);
+}
+.vl-console__dots { display: flex; gap: 0.3rem; margin-right: 0.4rem; }
+.vl-console__dots i { width: 9px; height: 9px; border-radius: 50%; display: block; }
+.vl-console__dots i:nth-child(1) { background: #d96a4a; }
+.vl-console__dots i:nth-child(2) { background: #c9a13f; }
+.vl-console__dots i:nth-child(3) { background: #5f9d6b; }
+.vl-console__body { padding: 0.9rem 1rem 1.1rem; font-size: 0.74rem; line-height: 1.85; }
+.vl-console__row { display: flex; align-items: center; gap: 0.6rem; }
+.vl-console__row .lat { margin-left: auto; color: rgba(243, 239, 231, 0.45); }
+.vl-console__row .ok { color: #7bbd8a; }
+.vl-console__prompt { color: rgba(243, 239, 231, 0.5); }
+.vl-console__prompt b { color: #e8b58a; font-weight: 500; }
+.vl-console .cursor { display: inline-block; width: 8px; height: 1em; background: #e8b58a; vertical-align: -2px; animation: vlBlink 1s steps(1) infinite; }
+
+/* ---- Adaptive zone config block ---- */
+.vl-zone-config {
+  margin: 0 0 1.25rem;
+  padding: 1.1rem 1.25rem;
+  border-radius: var(--radius);
+  border: 1px solid rgba(194, 105, 63, 0.3);
+  background: var(--accent-dim);
+  animation: vlFadeUp 0.45s var(--ease-out) both;
+}
+.vl-zone-config__head { display: flex; align-items: center; gap: 0.8rem; flex-wrap: wrap; margin-bottom: 0.9rem; }
+.vl-zone-config__icon { font-size: 1.3rem; color: var(--accent); line-height: 1; }
+.vl-zone-config__title { margin: 0; font-weight: 600; font-size: 0.94rem; color: var(--text); }
+.vl-zone-config__sub { margin: 0.15rem 0 0; font-size: 0.78rem; color: var(--muted); }
+.vl-zone-config__btns { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.vl-roi-chip {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 0.66rem; letter-spacing: 0.02em;
+  padding: 0.3rem 0.6rem;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--muted);
+  white-space: nowrap;
+}
+.vl-roi-chip.is-set { border-color: rgba(180, 89, 58, 0.4); color: var(--teal); background: var(--teal-dim); }
+
+/* ---- Process / control strip ---- */
+.vl-process-bar,
+.control-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1rem;
+  padding: 1rem 1.15rem;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 1rem;
+}
+.control-strip { margin-bottom: 0; }
+.control-strip .hint { flex: 1 1 14rem; font-size: 0.8rem; color: var(--muted); margin: 0; }
+.control-strip .hint strong { color: var(--text); }
+.vl-bar-label {
+  font-family: var(--mono);
+  font-size: 0.64rem; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* ---- Results bar (§ 04 / REPORT) ---- */
+.vl-results-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 1rem; flex-wrap: wrap;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  box-shadow: var(--shadow);
+  margin-bottom: 1.25rem;
+  animation: vlSlideInRight 0.5s var(--ease-out) both;
+}
+.vl-results-bar__info { display: flex; align-items: center; gap: 0.7rem; flex-wrap: wrap; min-width: 0; }
+.vl-results-bar__eyebrow {
+  font-family: var(--mono); font-size: 0.64rem; font-weight: 600;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent);
+}
+.vl-results-bar__title { font-weight: 700; font-size: 1.05rem; letter-spacing: -0.02em; color: var(--text); }
+
+/* Hide the wizard while results view is active */
+body.vl-results-active .vl-stepper,
+body.vl-results-active #screen-upload,
+body.vl-results-active #screen-models,
+body.vl-results-active #screen-process { display: none !important; }
+
+/* ---- Workspace grid ---- */
+.vl-work-grid {
+  display: grid;
+  grid-template-columns: 1fr min(320px, 100%);
+  gap: 1.1rem;
+  align-items: start;
+}
+@media (max-width: 980px) { .vl-work-grid { grid-template-columns: 1fr; } }
+.main-col { min-width: 0; }
+.sidebar { display: flex; flex-direction: column; gap: 1rem; }
