@@ -82,12 +82,14 @@ attachImageZoom(poster, () => 'Output preview');
 liveFrame.setAttribute('tabindex', '0');
 poster.setAttribute('tabindex', '0');
 
-$('thumbs').addEventListener('click', (e) => {
-  const row = e.target.closest('.t');
-  if (!row || !$('thumbs').contains(row)) return;
-  const img = row.querySelector('img');
-  const capEl = row.querySelector('.c');
-  if (img && img.src) openLightbox(img.src, capEl ? capEl.textContent : '');
+['thumbs', 'viol-thumbs'].forEach((stripId) => {
+  $(stripId).addEventListener('click', (e) => {
+    const row = e.target.closest('.t');
+    if (!row || !$(stripId).contains(row)) return;
+    const img = row.querySelector('img');
+    const capEl = row.querySelector('.c');
+    if (img && img.src) openLightbox(img.src, capEl ? capEl.textContent : '');
+  });
 });
 
 /* Button ripple (skipped under reduced-motion). */
@@ -194,6 +196,10 @@ function resetOutput() {
   liveBadge.style.display = 'none';
   $('thumbs').style.display = 'none';
   $('thumbs').innerHTML = '';
+  $('plate-thumbs-head').style.display = 'none';
+  $('viol-thumbs').style.display = 'none';
+  $('viol-thumbs').innerHTML = '';
+  $('viol-thumbs-head').style.display = 'none';
   $('st-frame-viol').textContent = '0';
   player.removeAttribute('src');
   player.load();

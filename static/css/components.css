@@ -238,6 +238,10 @@
 .event-log .ev.pending { color: #6b73a8; font-size: 0.68rem; }
 
 /* ---- Thumbnails ---- */
+.thumb-head { margin-top: 1rem; font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.14em; color: var(--faint); text-transform: uppercase; }
+.thumb-head + .thumb-strip { margin-top: 0.4rem; }
+.thumb-strip.viol .t { border-color: rgba(220, 38, 38, 0.55); box-shadow: 0 6px 18px rgba(160, 20, 20, 0.18); }
+.thumb-strip.viol .t .c { color: #d11; }
 .thumb-strip { display: flex; gap: 0.75rem; overflow-x: auto; margin-top: 1rem; padding: 0.35rem 0.25rem 0.5rem; scroll-snap-type: x mandatory; }
 .thumb-strip .t {
   flex: 0 0 88px; overflow: hidden;

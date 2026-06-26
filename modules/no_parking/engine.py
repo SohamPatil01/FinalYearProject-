@@ -59,7 +59,7 @@ class NoParkingEngine:
         frame = frame_bgr if frame_bgr.flags.writeable else frame_bgr.copy()
         corner_a, corner_b = _zone_corners(zone)
 
-        results = self._model(frame)
+        results = self._model(frame, device=getattr(config, "YOLO_DEVICE", "cpu"))
         cv2.rectangle(
             frame,
             (corner_a[0], corner_a[1]),

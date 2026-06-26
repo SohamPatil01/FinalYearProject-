@@ -67,7 +67,9 @@ def _draw_plate_boxes_on_frame(frame, plate_read: dict) -> None:
     inner = plate_read.get("bbox_raw")
     draw_inner = bool(getattr(config, "PLATE_DRAW_INNER_YOLO_BOX", True))
     pad = float(getattr(config, "PLATE_BBOX_EXPAND_FRAC", 0.0) or 0.0)
-    color_outer = (0, 255, 255)  # BGR cyan — high contrast
+    locked = not bool(plate_read.get("pending"))
+    # Green once the plate is identified/locked; cyan while still tracking/reading.
+    color_outer = (0, 200, 0) if locked else (0, 255, 255)  # BGR
     color_inner = (180, 200, 255)
     thick = max(3, int(getattr(config, "THICKNESS", 2)) + 1)
 
@@ -79,18 +81,19 @@ def _draw_plate_boxes_on_frame(frame, plate_read: dict) -> None:
 
     yolo_c = float(plate_read.get("yolo_conf", 0.0))
     tid = int(plate_read.get("track_id", 0))
+    # ASCII-only label (OpenCV's Hershey font renders non-ASCII like "·"/"…" as "?").
     if plate_read.get("ocr_error") and not plate_read.get("text"):
-        line = f"PLATE #{tid} · YOLO {yolo_c:.2f} · OCR?"
+        line = f"PLATE #{tid} | YOLO {yolo_c:.2f} | OCR?"
     elif plate_read.get("pending"):
         line = (
-            f"PLATE #{tid} · YOLO {yolo_c:.2f} · OCR…"
+            f"PLATE #{tid} | YOLO {yolo_c:.2f} | reading..."
             if plate_read.get("immediate_ocr")
-            else f"PLATE #{tid} · YOLO {yolo_c:.2f} · track…"
+            else f"PLATE #{tid} | YOLO {yolo_c:.2f} | tracking..."
         )
     else:
         txt = str(plate_read.get("text") or "?")[:18]
         ocf = float(plate_read.get("confidence", 0.0))
-        line = f"PLATE #{tid} · {txt} · OCR {ocf:.2f}"
+        line = f"PLATE #{tid} | {txt} | LOCKED {ocf:.2f}"
 
     fs = 0.55
     (tw, th), bl = cv2.getTextSize(line, cv2.FONT_HERSHEY_SIMPLEX, fs, 2)
@@ -267,6 +270,9 @@ class TrafficPipeline:
         self._helmet_present_ids: Set[int] = set(helmet_present_ids or [])
 
         self._violation_snapshot_seen: Set[Tuple[Any, ...]] = set()
+        # Incidents already counted, so a violation that persists across frames keeps its
+        # red box but is tallied only once (per truck track / rider cell / zone track).
+        self._incident_seen: Set[Tuple[Any, ...]] = set()
 
         if bool(getattr(config, "TRUCK_RESTRICTED_MATCH_VIOLATION_WINDOW", True)):
             restricted_s, restricted_e = self.truck_viol_start, self.truck_viol_end
@@ -289,6 +295,10 @@ class TrafficPipeline:
             getattr(config, "HELMET_CROP_DETECTION", True)
         )
         self._carrier_model = None
+        # Cache stores (track_id|None, class_id, conf, bbox) per frame.
+        self._carrier_cache: Optional[List[Tuple[Optional[int], int, float, List[int]]]] = None
+        self._carrier_cache_key: int = -1
+        self.vehicle_overlay = bool(getattr(config, "VEHICLE_OVERLAY", True))
         # Per-rider tracking so each rider's no-helmet violation is counted once.
         self._helmet_tracker = CentroidTracker(
             max_disappeared=int(getattr(config, "HELMET_TRACK_MAX_DISAPPEARED", 30)),
@@ -494,6 +504,7 @@ class TrafficPipeline:
         detections_for_rules: List[dict],
         triple_bbox_queue: "deque[List[int]]",
         helmet_bbox_queue: "deque[List[int]]",
+        truck_bbox_tid: Optional[Dict[Tuple[int, int, int, int], Optional[int]]] = None,
     ) -> List[Dict[str, Any]]:
         """
         One crop per *new* violation incident (deduped by rule + subject).
@@ -516,13 +527,18 @@ class TrafficPipeline:
                 if ti < len(truck_dets_sorted):
                     bbox = list(truck_dets_sorted[ti]["bbox"])
                     b = bbox
-                    key = (
-                        "truck_hours",
-                        int(b[0]) // 16,
-                        int(b[1]) // 16,
-                        int(b[2]) // 16,
-                        int(b[3]) // 16,
-                    )
+                    tid = (truck_bbox_tid or {}).get(tuple(int(v) for v in b))
+                    if tid is not None:
+                        # Stable per-truck key: one evidence crop per physical truck.
+                        key = ("truck_hours", "tid", int(tid))
+                    else:
+                        key = (
+                            "truck_hours",
+                            int(b[0]) // 16,
+                            int(b[1]) // 16,
+                            int(b[2]) // 16,
+                            int(b[3]) // 16,
+                        )
                     ti += 1
             elif msg in (TRIPLE_SEAT_VIOLATION_LABEL, "Triple riding detected"):
                 if triple_bbox_queue:
@@ -554,6 +570,9 @@ class TrafficPipeline:
         color = det.get("color") or MODEL_DRAW_COLORS.get(model_key, DEFAULT_DRAW_COLOR)
         if det.get("label"):
             label = f"{det['label']} {det['confidence']:.2f}"
+        elif model_key == "truck":
+            # All truck sub-classes (dump / mixed / rmc / truck) shown as one "truck".
+            label = f"truck {det['confidence']:.2f}"
         else:
             label = f"{model_key} | cls:{det['class']} | {det['confidence']:.2f}"
 
@@ -567,6 +586,78 @@ class TrafficPipeline:
             color,
             config.THICKNESS,
         )
+
+    def _get_carrier_model(self):
+        """Lazily load the shared COCO detector (person/vehicle) used by the crop-based
+        helmet and plate passes. Returns the model or None if it cannot be loaded."""
+        if self._carrier_model is None:
+            try:
+                from ultralytics import YOLO
+
+                self._carrier_model = YOLO(getattr(config, "HELMET_CARRIER_MODEL_PATH"))
+            except Exception as e:  # pragma: no cover - load failure path
+                _log.warning("Carrier model load failed (%s); crop passes disabled.", e)
+                self._carrier_model = False
+        return self._carrier_model or None
+
+    def _carrier_full(self, frame) -> List[Tuple[Optional[int], int, float, List[int]]]:
+        """COCO detections (track id, class id, conf, bbox) for the current frame, cached
+        so the helmet/plate crop passes and the vehicle overlay share one inference.
+
+        Uses Ultralytics' built-in ByteTrack (``model.track(persist=True)``) when the
+        vehicle overlay is on so each box carries a stable id; falls back to plain
+        detection otherwise (no id)."""
+        key = self._unified_frame_idx
+        if self._carrier_cache_key == key and self._carrier_cache is not None:
+            return self._carrier_cache
+        out: List[Tuple[Optional[int], int, float, List[int]]] = []
+        model = self._get_carrier_model()
+        if model is not None:
+            imgsz = int(getattr(config, "HELMET_CARRIER_IMGSZ", 960))
+            device = getattr(config, "YOLO_DEVICE", "cpu")
+            try:
+                if self.vehicle_overlay:
+                    res = model.track(
+                        frame, persist=True, tracker="bytetrack.yaml",
+                        verbose=False, imgsz=imgsz, device=device,
+                    )[0]
+                else:
+                    res = model(frame, verbose=False, imgsz=imgsz, device=device)[0]
+                for b in res.boxes or []:
+                    tid = int(b.id[0]) if getattr(b, "id", None) is not None else None
+                    out.append(
+                        (tid, int(b.cls[0]), float(b.conf[0]), [int(v) for v in b.xyxy[0].tolist()])
+                    )
+            except Exception:
+                out = []
+        self._carrier_cache = out
+        self._carrier_cache_key = key
+        return out
+
+    def _carrier_detections(self, frame) -> List[Tuple[int, float, List[int]]]:
+        """COCO detections as (class id, confidence, bbox) — id-stripped view for the
+        helmet and plate crop passes."""
+        return [(c, cf, b) for (_id, c, cf, b) in self._carrier_full(frame)]
+
+    def _draw_vehicle_overlay(self, frame) -> None:
+        """Label each vehicle with its class + stable ByteTrack id."""
+        names = getattr(config, "COCO_VEHICLE_NAMES", {})
+        min_conf = float(getattr(config, "VEHICLE_OVERLAY_MIN_CONF", 0.35))
+        for tid, cid, conf, (x1, y1, x2, y2) in self._carrier_full(frame):
+            if cid not in names or conf < min_conf:
+                continue
+            label = f"{names[cid]} #{tid}" if tid is not None else names[cid]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 200, 255), 2)
+            cv2.putText(
+                frame, label, (x1, max(y1 - 6, 16)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 2,
+            )
+
+    def _plate_vehicle_boxes(self, frame) -> List[List[int]]:
+        """Vehicle boxes (car/motorcycle/bus/truck) to scope plate detection to."""
+        ids = {int(x) for x in getattr(config, "PLATE_VEHICLE_CLASS_IDS", [2, 3, 5, 7])}
+        mc = float(getattr(config, "PLATE_VEHICLE_MIN_CONF", 0.30))
+        return [box for cid, cf, box in self._carrier_detections(frame) if cid in ids and cf >= mc]
 
     def _helmet_crop_detections(self, frame, *, immediate: bool = False) -> List[dict]:
         """Crop-based, per-rider helmet decision.
@@ -586,21 +677,15 @@ class TrafficPipeline:
             return []
         if not self._helmet_viol_ids and not self._helmet_present_ids:
             return []
-        if self._carrier_model is None:
-            try:
-                from ultralytics import YOLO
-
-                self._carrier_model = YOLO(getattr(config, "HELMET_CARRIER_MODEL_PATH"))
-            except Exception as e:  # pragma: no cover - load failure path
-                _log.warning("Helmet carrier model load failed (%s); crop detection off.", e)
-                self.use_helmet_crop = False
-                return []
+        carrier_dets = self._carrier_detections(frame)
+        if not carrier_dets and self._get_carrier_model() is None:
+            self.use_helmet_crop = False
+            return []
 
         hmodel = self.detector.models["helmet"]
         H, W = frame.shape[:2]
         carrier_ids = {int(x) for x in getattr(config, "HELMET_CARRIER_CLASS_IDS", [1, 3])}
         c_conf = float(getattr(config, "HELMET_CARRIER_MIN_CONF", 0.30))
-        c_imgsz = int(getattr(config, "HELMET_CARRIER_IMGSZ", 960))
         crop_imgsz = int(getattr(config, "HELMET_CROP_IMGSZ", 640))
         crop_conf = float(getattr(config, "HELMET_CROP_CONF", 0.20))
         present_th = float(getattr(config, "HELMET_CROP_PRESENT_CONF", 0.45))
@@ -608,11 +693,6 @@ class TrafficPipeline:
         absence_on = bool(getattr(config, "HELMET_CROP_ABSENCE", True))
         absence_conf = float(getattr(config, "HELMET_CROP_ABSENCE_CONF", 0.60))
         max_riders = int(getattr(config, "HELMET_CROP_MAX_RIDERS", 10))
-
-        try:
-            cres = self._carrier_model(frame, verbose=False, imgsz=c_imgsz)[0]
-        except Exception:
-            return []
 
         merge_iou = float(getattr(config, "HELMET_RIDER_MERGE_IOU", 0.4))
 
@@ -631,16 +711,13 @@ class TrafficPipeline:
 
         persons: List[List[int]] = []
         bikes: List[List[int]] = []
-        if cres.boxes is not None:
-            for b in cres.boxes:
-                cid = int(b.cls[0])
-                if float(b.conf[0]) < c_conf:
-                    continue
-                box = [int(v) for v in b.xyxy[0].tolist()]
-                if cid == 0:
-                    persons.append(box)
-                elif cid in carrier_ids:
-                    bikes.append(box)
+        for cid, cf, box in carrier_dets:
+            if cf < c_conf:
+                continue
+            if cid == 0:
+                persons.append(list(box))
+            elif cid in carrier_ids:
+                bikes.append(list(box))
 
         # Merge overlapping detections so one bike / one person is not split into several.
         bikes = nms(bikes, 0.5)
@@ -676,7 +753,10 @@ class TrafficPipeline:
             if crop.size == 0 or crop.shape[0] < 12 or crop.shape[1] < 12:
                 return 0.0, 0.0
             try:
-                r = hmodel(crop, verbose=False, imgsz=crop_imgsz, conf=crop_conf)[0]
+                r = hmodel(
+                    crop, verbose=False, imgsz=crop_imgsz, conf=crop_conf,
+                    device=getattr(config, "YOLO_DEVICE", "cpu"),
+                )[0]
             except Exception:
                 return 0.0, 0.0
             withc = woc = 0.0
@@ -876,7 +956,6 @@ class TrafficPipeline:
                     and scoped
                     and len(truck_boxes) > 0
                 )
-                plate_infer_mode = "truck_roi" if use_roi else "full_frame"
                 pad = float(
                     getattr(
                         config,
@@ -884,15 +963,37 @@ class TrafficPipeline:
                         getattr(config, "TRUCK_ROI_PLATE_PAD_FRAC", 0.18),
                     )
                 )
-                plate_dets = self.detector.infer_plate(
-                    frame,
-                    truck_boxes,
-                    use_truck_roi=use_roi,
-                    truck_roi_pad_frac=pad,
-                    include_full_frame_when_roi=bool(
-                        getattr(config, "PLATE_INCLUDE_FULL_FRAME_WITH_TRUCK_ROI", True)
-                    ),
-                )
+                veh_crop = bool(getattr(config, "PLATE_VEHICLE_CROP", True))
+                vehicle_boxes = self._plate_vehicle_boxes(frame) if (veh_crop and not use_roi) else []
+                if use_roi:
+                    plate_infer_mode = "truck_roi"
+                    plate_dets = self.detector.infer_plate(
+                        frame,
+                        truck_boxes,
+                        use_truck_roi=True,
+                        truck_roi_pad_frac=pad,
+                        include_full_frame_when_roi=bool(
+                            getattr(config, "PLATE_INCLUDE_FULL_FRAME_WITH_TRUCK_ROI", True)
+                        ),
+                    )
+                elif vehicle_boxes:
+                    # Scope plate YOLO to each vehicle crop (plate stays near native size).
+                    plate_infer_mode = "vehicle_roi"
+                    plate_dets = self.detector.infer_plate(
+                        frame,
+                        vehicle_boxes,
+                        use_truck_roi=True,
+                        truck_roi_pad_frac=float(
+                            getattr(config, "PLATE_VEHICLE_CROP_PAD_FRAC", 0.10)
+                        ),
+                        include_full_frame_when_roi=bool(
+                            force_full_frame_plate
+                            or getattr(config, "PLATE_VEHICLE_INCLUDE_FULL_FRAME", False)
+                        ),
+                    )
+                else:
+                    plate_infer_mode = "full_frame"
+                    plate_dets = self.detector.infer_plate(frame, [], use_truck_roi=False)
                 for d in plate_dets:
                     d["bbox_raw"] = [int(x) for x in d["bbox"]]
                 self._cached_plate_dets = [dict(d) for d in plate_dets]
@@ -931,6 +1032,9 @@ class TrafficPipeline:
 
         for det in other_dets:
             self.draw_detection(frame, det)
+
+        if self.vehicle_overlay:
+            self._draw_vehicle_overlay(frame)
 
         plate_reads: List[Dict[str, Any]] = []
         if self.use_plate and (
@@ -1122,6 +1226,45 @@ class TrafficPipeline:
                 2,
             )
 
+        # Map each truck detection to its stable tracker id so a violation is counted
+        # once per physical truck — not once per frame, nor per pixel-cell it drifts through.
+        truck_bbox_tid: Dict[Tuple[int, int, int, int], Optional[int]] = {}
+        if self.use_truck and tracked_objects:
+            tracked_centroids = [
+                (tid, ((tb[0] + tb[2]) / 2.0, (tb[1] + tb[3]) / 2.0))
+                for tid, tb in tracked_objects.items()
+            ]
+            for d in truck_dets:
+                b = d["bbox"]
+                cx, cy = (b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0
+                best_tid, best_dist = None, None
+                for tid, (tcx, tcy) in tracked_centroids:
+                    dist = (cx - tcx) ** 2 + (cy - tcy) ** 2
+                    if best_dist is None or dist < best_dist:
+                        best_dist, best_tid = dist, tid
+                truck_bbox_tid[tuple(int(v) for v in b)] = best_tid
+
+        # Tally each violation a single time per incident (per truck track / rider cell /
+        # zone track). The bounding box still draws every frame; only the count fires once.
+        new_violation_count = 0
+
+        def _mark_incident(key: Tuple[Any, ...]) -> None:
+            nonlocal new_violation_count
+            if key not in self._incident_seen:
+                self._incident_seen.add(key)
+                new_violation_count += 1
+
+        _cell_px = max(16, int(getattr(config, "TRIPLE_STREAK_CELL_PX", 72)))
+        _hcell_px = max(16, int(getattr(config, "HELMET_STREAK_CELL_PX", 64)))
+        if self.use_truck and truck_rules_active:
+            for d in truck_dets:
+                tid = truck_bbox_tid.get(tuple(int(v) for v in d["bbox"]))
+                _mark_incident(("truck", tid) if tid is not None else ("truck", tuple(int(v) for v in d["bbox"])))
+        for _m, _b in t_pairs:
+            _mark_incident(("triple", ((_b[0] + _b[2]) // 2) // _cell_px, ((_b[1] + _b[3]) // 2) // _cell_px))
+        for _m, _b in h_pairs:
+            _mark_incident(("helmet", ((_b[0] + _b[2]) // 2) // _hcell_px, ((_b[1] + _b[3]) // 2) // _hcell_px))
+
         # Attach plate text to each violation when a nearby / overlapping plate is available.
         violation_lines: List[str] = []
         truck_sorted = sorted(truck_dets, key=lambda d: float(d["bbox"][0]))
@@ -1151,6 +1294,7 @@ class TrafficPipeline:
             detections_for_rules,
             triple_bbox_queue,
             helmet_bbox_queue,
+            truck_bbox_tid=truck_bbox_tid,
         )
 
         y = 52 if self.use_truck else 50
@@ -1208,5 +1352,19 @@ class TrafficPipeline:
             zone_lines = normalize_engine_events(engine_events)
             violations = list(dict.fromkeys(list(violations or []) + zone_lines))
             meta["engine_events"] = engine_events
+            for ev in engine_events:
+                etid = ev.get("track_id")
+                _mark_incident(
+                    (
+                        "engine",
+                        ev.get("violation_type"),
+                        ev.get("zone"),
+                        int(etid) if etid is not None else tuple(ev.get("bbox") or []),
+                    )
+                )
+
+        # Number of *new* violations this frame (already-flagged incidents excluded), so the
+        # running total counts each violation once instead of every frame it stays visible.
+        meta["new_violation_count"] = new_violation_count
 
         return frame, violations, meta

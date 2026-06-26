@@ -123,6 +123,7 @@ $('run').addEventListener('click', async () => {
           prependLog(
             `${ev.t_sec}s · ${escapeHtml('V' + ev.tid)} · plate <span class="plate-txt">${escapeHtml(ev.text)}</span> · OCR ${(ev.ocr || 0).toFixed(2)}`
           );
+          $('plate-thumbs-head').style.display = 'block';
           const strip = $('thumbs');
           strip.style.display = 'flex';
           const d = document.createElement('div');
@@ -140,6 +141,18 @@ $('run').addEventListener('click', async () => {
             `${ev.t_sec}s · ${escapeHtml(ev.vid || '—')}${zone} · <span class="vio">${escapeHtml(ev.summary || 'Violation')}</span>${plate}`,
             'vio'
           );
+          if (ev.thumb) {
+            $('viol-thumbs-head').style.display = 'block';
+            const strip = $('viol-thumbs');
+            strip.style.display = 'flex';
+            const cap = `${ev.summary || 'Violation'}${ev.plate ? ' · ' + ev.plate : ''} · ${ev.t_sec}s`;
+            const d = document.createElement('div');
+            d.className = 't';
+            d.innerHTML = `<img src="${ev.thumb}" alt="" loading="lazy" /><span class="zoom-hint">Tap to zoom</span><div class="c">${escapeHtml(cap)}</div>`;
+            strip.insertBefore(d, strip.firstChild);
+            if (window.VLAnim) VLAnim.reveal(d, 'vl-pop');
+            while (strip.children.length > 40) strip.removeChild(strip.lastChild);
+          }
           if (window.VLAnim) VLAnim.flash(videoShell);
         }
         if (ev.type === 'done') {
@@ -151,6 +164,7 @@ $('run').addEventListener('click', async () => {
           liveFrame.style.display = 'none';
           const plates = ev.plates || [];
           if (plates.length) {
+            $('plate-thumbs-head').style.display = 'block';
             const strip = $('thumbs');
             strip.innerHTML = '';
             strip.style.display = 'flex';

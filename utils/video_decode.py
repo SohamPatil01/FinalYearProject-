@@ -154,7 +154,7 @@ def iter_decode_video(
             # Wall-clock slot for realtime SSE pacing (must be before heavy work).
             _pace_t0 = time.perf_counter()
             processed, violations, meta = pipeline.process_frame(frame)
-            cum_viol += len(violations)
+            cum_viol += int(meta.get("new_violation_count", len(violations)))
             n_before = len(captures)
             if pipeline.use_plate and orig is not None:
                 append_plate_capture_from_frame(
@@ -246,7 +246,7 @@ def iter_decode_image(
         force_full_frame_plate=True,
     )
 
-    cum_viol = len(violations)
+    cum_viol = int(meta.get("new_violation_count", len(violations)))
     n_before = len(captures)
     if pipeline.use_plate and orig is not None:
         append_plate_capture_from_frame(

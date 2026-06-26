@@ -45,6 +45,17 @@ TRUCK_ROI_PLATE_PAD_FRAC: float = 0.18  # legacy; keep in sync with TRUCK_PLATE_
 PLATE_INCLUDE_FULL_FRAME_WITH_TRUCK_ROI: bool = True
 # Ignore truck detections below this confidence when building ROIs for plate (0 = no filter).
 TRUCK_PLATE_MIN_TRUCK_CONF: float = 0.0
+
+# --- Vehicle-scoped plate detection -------------------------------------------
+# A full-frame plate pass shrinks plates to a few pixels on wide footage (only the
+# truck path worked, because it crops first). When on, a COCO detector finds all
+# vehicles, and the plate model runs on each vehicle crop (plate stays near native
+# resolution), then maps back — extending the truck-ROI trick to cars/bikes/buses.
+PLATE_VEHICLE_CROP: bool = True
+PLATE_VEHICLE_CLASS_IDS: List[int] = [2, 3, 5, 7]  # COCO: car, motorcycle, bus, truck
+PLATE_VEHICLE_MIN_CONF: float = 0.30
+PLATE_VEHICLE_CROP_PAD_FRAC: float = 0.10
+PLATE_VEHICLE_INCLUDE_FULL_FRAME: bool = False  # also run a full-frame pass (costlier)
 # Scoped plate YOLO: search only the lower part of each expanded truck ROI (bumper / plate region).
 # Matches the reference `cut_y = y1 + int(h * 0.5)` on the truck box. Set False to search the full ROI.
 TRUCK_PLATE_ROI_BOTTOM_HALF_ONLY: bool = True
@@ -52,7 +63,10 @@ TRUCK_PLATE_ROI_BOTTOM_HALF_ONLY: bool = True
 TRUCK_PLATE_ROI_VERTICAL_START_FRAC: float = 0.50
 # Multi-class truck checkpoints often label cars / autos / bikes as separate classes. If empty,
 # class IDs are inferred from `model.names` when TRUCK_AUTO_CLASS_FILTER is True.
-TRUCK_CLASS_IDS: List[int] = []
+# The bundled truck.pt has classes {0:car, 1:dump, 2:mixed, 3:number_plate, 4:rmc truck, 5:truck}.
+# We treat every truck *variant* (dump / mixed / rmc / truck) as a single "truck" vehicle class
+# and exclude car (0) and number_plate (3). This also stops dump/mixed trucks from being missed.
+TRUCK_CLASS_IDS: List[int] = [1, 2, 4, 5]
 # Infer truck vs non-truck classes from YOLO names (e.g. keep "truck", drop "car", "auto").
 TRUCK_AUTO_CLASS_FILTER: bool = True
 # Drop truck-head boxes below this confidence (0 = no filter). Raise to ~0.35–0.5 to cut soft false positives.
@@ -84,10 +98,36 @@ EASYOCR_LANGS: List[str] = ["en"]
 # Use GPU for EasyOCR when CUDA is available (much faster than CPU OCR)
 EASYOCR_USE_GPU: bool = True
 
+# Compute device for all YOLO/Ultralytics inference. Auto-picks the fastest backend:
+# CUDA GPU > Apple Silicon GPU (MPS) > CPU. On this Mac, MPS is ~2.5-3.6x faster than
+# CPU for yolov8n, which is the difference between a smooth and a stalling live preview.
+# Override by setting VIOLANE_DEVICE in the environment (e.g. "cpu", "mps", "0").
+def _resolve_yolo_device() -> str:
+    import os
+
+    forced = os.environ.get("VIOLANE_DEVICE", "").strip()
+    if forced:
+        return forced
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "0"
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return "cpu"
+
+
+YOLO_DEVICE: str = _resolve_yolo_device()
+
 # YOLO speed (lower imgsz = faster; 416 is a good balance for real-time on GPU)
 YOLO_IMGSZ: int = 416
-# Smaller size for the plate model only (plates are small; 320 cuts cost vs full YOLO_IMGSZ)
-YOLO_PLATE_IMGSZ: int = 320
+# Plate model size. Runs mostly on small vehicle crops, so a larger size resolves
+# plates well at little cost (full-frame plate passes are throttled / rare).
+YOLO_PLATE_IMGSZ: int = 640
 # FP16 on CUDA only; auto-fallback on CPU in detectors.py
 YOLO_HALF_PRECISION: bool = True
 # Run plate **detector** YOLO every N processed frames (1 = every frame). Cached boxes between runs still get OCR on crops when gates pass.
@@ -105,11 +145,12 @@ PLATE_DRAW_INNER_YOLO_BOX: bool = True
 # If False: no tracker — OCR runs on plate YOLO boxes directly (``ocr_plate_detections_one_shot``), throttled by
 # ``PLATE_OCR_ATTEMPT_EVERY_N_FRAMES``. Simpler but heavier CPU, jittery track IDs, and no stability voting.
 PLATE_USE_TRACK_OCR_GATE: bool = True
-PLATE_TRACK_MAX_DISTANCE: int = 95
-PLATE_TRACK_MAX_DISAPPEARED: int = 22
+PLATE_TRACK_MAX_DISTANCE: int = 110
+# Keep a locked plate's track alive across longer detection gaps so the box "stays".
+PLATE_TRACK_MAX_DISAPPEARED: int = 40
 # EMA on plate box per track (0 = off). Smooths jitter between YOLO refreshes for steadier crops and reads.
 PLATE_BBOX_SMOOTH_ALPHA: float = 0.42
-PLATE_OCR_MIN_YOLO_CONF: float = 0.6
+PLATE_OCR_MIN_YOLO_CONF: float = 0.45
 PLATE_OCR_MIN_AREA: int = 2000
 # width/height; include portrait-ish / square plate boxes (truck fronts, angles).
 PLATE_OCR_MIN_ASPECT: float = 0.35
@@ -120,8 +161,9 @@ PLATE_OCR_MIN_SHARPNESS: float = 35.0
 # If aspect/area fails but Laplacian sharpness reaches this, still allow OCR (stable + YOLO ok).
 PLATE_OCR_BYPASS_GEOM_SHARPNESS: float = 120.0
 # Require this many stable frames before OCR — plate YOLO still runs every frame; EasyOCR waits until the box settles.
-PLATE_OCR_STABLE_FRAMES: int = 3
-PLATE_OCR_MAX_CENTROID_DRIFT: float = 20.0
+PLATE_OCR_STABLE_FRAMES: int = 2
+# Plates on moving vehicles drift more than a few px/frame; allow that and still count as stable.
+PLATE_OCR_MAX_CENTROID_DRIFT: float = 48.0
 PLATE_OCR_MIN_TEXT_LEN: int = 4
 # Confirm a plate read by agreement across this many OCR reads (confidence-weighted vote)
 # before locking it — corrects single-frame OCR mistakes. Set to 1 to lock on the first read.
@@ -198,6 +240,36 @@ PLATE_OCR_UPSCALE_MAX_FACTOR: float = 3.0
 # Evidence crops when a violation fires (first frame per incident only; see TrafficPipeline).
 VIOLATION_SNAPSHOT_PAD_FRAC: float = 0.12
 VIOLATION_SNAPSHOT_THUMB_MAX_WIDTH: int = 140
+
+# --- Vehicle classification overlay (ByteTrack) -------------------------------
+# Draw a class + stable track-id label on each vehicle using the shared COCO
+# detector (yolov8n) with Ultralytics' built-in ByteTrack. Reuses the carrier
+# inference already run for helmet/plate crops, so it is free on those runs and
+# one extra yolov8n pass otherwise.
+VEHICLE_OVERLAY: bool = True
+VEHICLE_OVERLAY_MIN_CONF: float = 0.35
+# COCO ids -> display names. ponytail: COCO has no auto-rickshaw/emergency class,
+# so those are omitted; add a custom-model name mapping here to support them.
+COCO_VEHICLE_NAMES: Dict[int, str] = {2: "Car", 3: "Motorcycle", 5: "Bus", 7: "Truck", 1: "Bicycle"}
+
+# Fine amounts (INR) per violation, matched by keyword in the violation message.
+FINE_AMOUNTS: Dict[str, int] = {
+    "red light": 1000,
+    "parking": 500,
+    "helmet": 500,
+    "triple": 1000,
+    "truck": 2000,
+}
+FINE_DEFAULT: int = 500
+
+
+def fine_for(violation_type: str) -> int:
+    """INR fine for a violation message (first keyword match; FINE_DEFAULT otherwise)."""
+    m = (violation_type or "").lower()
+    for key, amt in FINE_AMOUNTS.items():
+        if key in m:
+            return amt
+    return FINE_DEFAULT
 
 
 class ModelCatalogEntry(TypedDict):
@@ -341,7 +413,10 @@ HELMET_CROP_CONF: float = 0.20  # low: the per-crop run is only a signal source
 # Per-rider decision (ensemble of crop variants).
 # A rider counts as helmeted only if a "With Helmet" box reaches this confidence;
 # otherwise (explicit "Without Helmet", OR no confident helmet at all) it's a violation.
-HELMET_CROP_PRESENT_CONF: float = 0.45   # confidently helmeted -> no violation
+# Raised from 0.45 -> 0.62: the helmet model emits weak (~0.45) false "With Helmet"
+# boxes on bare/distant heads, which were wrongly suppressing real no-helmet violations.
+# Require a clearly confident helmet before trusting it; weak evidence -> violation.
+HELMET_CROP_PRESENT_CONF: float = 0.62   # confidently helmeted -> no violation
 HELMET_CROP_VIOL_CONF: float = 0.25      # explicit "Without Helmet" signal
 HELMET_CROP_ABSENCE: bool = True         # flag riders with no confident helmet
 HELMET_CROP_ABSENCE_CONF: float = 0.60   # confidence stamped on absence violations

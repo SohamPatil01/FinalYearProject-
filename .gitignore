@@ -18,3 +18,6 @@ vlstage_*/
 
 # Duplicate of models/plate.pt at repo root
 best (1).pt
+
+# Generated SQLite violation store
+violations.db

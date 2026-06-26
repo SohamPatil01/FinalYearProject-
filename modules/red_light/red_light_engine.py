@@ -82,7 +82,10 @@ class RedLightPipelineEngine:
         frame = cv2.resize(frame_bgr, (1020, 600))
         fh, fw = frame.shape[0], frame.shape[1]
 
-        results = pm.model(frame, conf=pm.VEHICLE_CONF, iou=0.5, verbose=False)
+        results = pm.model(
+            frame, conf=pm.VEHICLE_CONF, iou=0.5, verbose=False,
+            device=getattr(config, "YOLO_DEVICE", "cpu"),
+        )
         a = results[0].boxes.data.cpu()
         px = pd.DataFrame(a).astype("float")
 

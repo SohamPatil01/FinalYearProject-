@@ -17,6 +17,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import config
+from app import db
 from app.media import (
     build_summary_dict,
     frame_to_data_uri_jpeg,
@@ -32,6 +33,25 @@ from utils.video_decode import iter_decode_media
 router = APIRouter()
 
 
+def _save_violation(camera, vtype, vehicle_class, track_id, plate, plate_conf, frame_idx, t_sec, evidence):
+    """Persist one violation; never let a DB error break the live stream."""
+    try:
+        db.insert_violation(
+            camera=camera,
+            violation_type=vtype,
+            vehicle_class=vehicle_class,
+            track_id=str(track_id) if track_id not in (None, "—") else "",
+            plate_text=plate,
+            plate_conf=plate_conf,
+            fine_amount=config.fine_for(vtype),
+            frame_index=int(frame_idx),
+            t_sec=float(t_sec),
+            evidence=evidence,
+        )
+    except Exception:
+        pass
+
+
 @router.post("/api/run-stream")
 async def api_run_stream(
     models: str = Form(""),
@@ -40,6 +60,7 @@ async def api_run_stream(
     video: Optional[UploadFile] = File(None),
     truck_start: int = Form(6),
     truck_end: int = Form(22),
+    camera: str = Form("CAM-01"),
 ):
     mids = parse_csv_ids(models)
     rules_list = parse_csv_ids(rules)
@@ -139,6 +160,9 @@ async def api_run_stream(
                                 "summary": summary_txt,
                             }
                         )
+                        _save_violation(
+                            camera, summary_txt, "", vid, plate, None, _fi, t_sec, ""
+                        )
                         yield sse_pack(
                             {
                                 "type": "violation_new",
@@ -149,6 +173,35 @@ async def api_run_stream(
                                 "frame": _fi,
                                 "t_sec": t_sec,
                                 "violation_type": eng_ev.get("violation_type"),
+                            }
+                        )
+                    for snap in ev["meta"].get("violation_snapshots") or []:
+                        t_sec = round((_fi * ev["dec_skip"]) / max(ev["fps"], 1e-6), 1)
+                        msg = str(snap.get("message") or "Violation")
+                        thumb = thumb_data_uri(snap["thumb_rgb"])
+                        zone_recent.append(
+                            {
+                                "t_sec": t_sec,
+                                "vid": "—",
+                                "zone": "—",
+                                "plate": "",
+                                "frame": _fi,
+                                "kind": "rule",
+                                "summary": msg,
+                            }
+                        )
+                        _save_violation(camera, msg, "", "", "", None, _fi, t_sec, thumb)
+                        yield sse_pack(
+                            {
+                                "type": "violation_new",
+                                "summary": msg,
+                                "zone": "—",
+                                "vid": "—",
+                                "plate": "",
+                                "frame": _fi,
+                                "t_sec": t_sec,
+                                "violation_type": msg,
+                                "thumb": thumb,
                             }
                         )
                     for c in ev["new_captures"]:

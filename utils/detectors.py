@@ -102,15 +102,16 @@ class MultiModelDetector:
         plate_key = getattr(config, "PLATE_MODEL_KEY", "plate")
         plate_sz = int(getattr(config, "YOLO_PLATE_IMGSZ", default_sz))
         use_half = bool(getattr(config, "YOLO_HALF_PRECISION", False)) and torch.cuda.is_available()
+        device = getattr(config, "YOLO_DEVICE", "cpu")
 
         for model_name, model in self.models.items():
             if model_name in skip:
                 continue
             imgsz = plate_sz if model_name == plate_key else default_sz
             try:
-                results = model(frame, verbose=False, imgsz=imgsz, half=use_half)
+                results = model(frame, verbose=False, imgsz=imgsz, half=use_half, device=device)
             except Exception:
-                results = model(frame, verbose=False, imgsz=imgsz, half=False)
+                results = model(frame, verbose=False, imgsz=imgsz, half=False, device=device)
             if not results:
                 continue
 
@@ -161,15 +162,16 @@ class MultiModelDetector:
         default_sz = int(getattr(config, "YOLO_IMGSZ", 640))
         plate_sz = int(getattr(config, "YOLO_PLATE_IMGSZ", default_sz))
         use_half = bool(getattr(config, "YOLO_HALF_PRECISION", False)) and torch.cuda.is_available()
+        device = getattr(config, "YOLO_DEVICE", "cpu")
         merge_iou = float(getattr(config, "PLATE_ROI_MERGE_IOU", 0.45))
         min_pc = float(getattr(config, "PLATE_YOLO_MIN_CONF", 0.0))
 
         def _run_on_bgr(bgr, ox: int = 0, oy: int = 0) -> List[dict]:
             out: List[dict] = []
             try:
-                results = model(bgr, verbose=False, imgsz=plate_sz, half=use_half)
+                results = model(bgr, verbose=False, imgsz=plate_sz, half=use_half, device=device)
             except Exception:
-                results = model(bgr, verbose=False, imgsz=plate_sz, half=False)
+                results = model(bgr, verbose=False, imgsz=plate_sz, half=False, device=device)
             if not results:
                 return out
             result = results[0]
