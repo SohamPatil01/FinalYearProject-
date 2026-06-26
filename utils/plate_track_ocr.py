@@ -125,6 +125,9 @@ class PlateOCRGate:
         retry_gap = int(getattr(config, "PLATE_OCR_RETRY_MIN_FRAMES", 6))
         max_fails = max(1, int(getattr(config, "PLATE_OCR_MAX_TRIES_PER_TRACK", 2)))
         one_shot = bool(getattr(config, "PLATE_OCR_ONE_SHOT_PER_TRACK", False))
+        # Deferred OCR: track plates only here; OCR runs once per plate in a batch
+        # after the whole video finishes (see utils.video_decode).
+        defer_ocr = bool(getattr(config, "PLATE_OCR_DEFERRED", False))
         frame_ocr_budget = max(0, int(getattr(config, "PLATE_OCR_MAX_TRIES_PER_FRAME", 1)))
         ocr_stride = max(1, int(getattr(config, "PLATE_OCR_ATTEMPT_EVERY_N_FRAMES", 1)))
         on_ocr_frame = (self._frame_count % ocr_stride) == 0
@@ -259,7 +262,9 @@ class PlateOCRGate:
                     m["ocr_error"] = True
                     m["ocr_fail_count"] = int(m.get("ocr_fail_count", 0)) + 1
 
-            if not m["has_ocr"]:
+            if defer_ocr:
+                pass  # OCR deferred to end-of-video batch; this frame only tracks.
+            elif not m["has_ocr"]:
                 fail_count = int(m.get("ocr_fail_count", 0))
                 # Exponential retry backoff for failed tracks: retry_gap, 2x, 4x...
                 effective_retry_gap = retry_gap * (2 ** min(fail_count, 2))

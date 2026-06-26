@@ -18,7 +18,44 @@ import numpy as np
 import config
 from utils.faststart import remux_faststart
 from utils.pipeline import TrafficPipeline
+from utils.plate_ocr import looks_like_indian_plate, read_plate_from_crop
 from utils.ui_common import append_plate_capture_from_frame
+
+
+def _run_deferred_plate_ocr(pipeline: TrafficPipeline, captures: List[Dict[str, Any]]) -> None:
+    """OCR every collected plate crop once, after the whole video is decoded.
+
+    The pipeline only detects/tracks plates during decode (PLATE_OCR_DEFERRED);
+    here we read each plate's single best crop and fill in its text. Crops are
+    dropped afterwards so the captures stay small for the summary payload.
+    """
+    if not captures:
+        return
+    try:
+        reader = pipeline._get_ocr_reader()
+    except Exception:
+        reader = None
+    min_chars = int(getattr(config, "PLATE_OCR_MIN_TEXT_LEN", 4))
+    display_min = float(getattr(config, "PLATE_OCR_DISPLAY_MIN_CONF", 0.0))
+    for c in captures:
+        crop = c.pop("crop_bgr", None)
+        if crop is None:
+            continue
+        try:
+            txt, conf = read_plate_from_crop(reader, crop)
+        except Exception:
+            txt, conf = "", 0.0
+        # Show a plate string only when it's a plausible read; otherwise keep the
+        # crop but leave the text blank rather than display OCR garbage.
+        trustworthy = bool(txt) and len(txt.replace(" ", "")) >= min_chars and (
+            looks_like_indian_plate(txt) or float(conf) >= display_min
+        )
+        if trustworthy:
+            c["text"] = txt
+            c["ocr"] = float(conf)
+        else:
+            c["text"] = ""
+            c["ocr"] = float(conf)
 
 
 def _open_video_writer(out_path: Path, fps: float, size) -> "cv2.VideoWriter":
@@ -134,6 +171,9 @@ def iter_decode_video(
     seen: set = set()
     max_gal = int(getattr(config, "DASHBOARD_PLATE_GALLERY_MAX_ITEMS", 80))
     th_w = int(getattr(config, "DASHBOARD_SIDEBAR_PLATE_THUMB", 132))
+    # Deferred OCR: collect best crop per plate now, read them all once at the end.
+    deferred_ocr = pipeline.use_plate and bool(getattr(config, "PLATE_OCR_DEFERRED", False))
+    track_best: Dict[Any, float] = {}
 
     est_decoded = max(1, (src_total + dec_skip - 1) // dec_skip) if src_total > 0 else 1
 
@@ -165,6 +205,8 @@ def iter_decode_video(
                     captures=captures,
                     max_items=max_gal,
                     thumb_w=th_w,
+                    store_crop=deferred_ocr,
+                    track_best=track_best if deferred_ocr else None,
                 )
             new_captures = captures[n_before:]
             if writer is not None:
@@ -193,6 +235,12 @@ def iter_decode_video(
 
     if frame_idx > 0 and src_total <= 0:
         est_decoded = frame_idx
+
+    if deferred_ocr:
+        pending_n = sum(1 for c in captures if c.get("crop_bgr") is not None)
+        if pending_n:
+            yield {"kind": "ocr_start", "total": pending_n}
+        _run_deferred_plate_ocr(pipeline, captures)
 
     yield {
         "kind": "done",

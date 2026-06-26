@@ -118,6 +118,16 @@ $('run').addEventListener('click', async () => {
             }
           }
         }
+        if (ev.type === 'plates_loading') {
+          traceMark('ocr', 'active');
+          const ld = $('plate-loading');
+          if (ld) {
+            ld.style.display = 'flex';
+            const n = Number(ev.total || 0);
+            $('plate-loading-text').textContent = n > 0 ? `Reading ${n} plate${n === 1 ? '' : 's'}…` : 'Reading plates…';
+          }
+          $('plate-thumbs-head').style.display = 'block';
+        }
         if (ev.type === 'plate_new') {
           traceMark('ocr', 'active');
           prependLog(
@@ -131,7 +141,7 @@ $('run').addEventListener('click', async () => {
           d.innerHTML = `<img src="${ev.thumb}" alt="" loading="lazy" /><span class="zoom-hint">Tap to zoom</span><div class="c">${escapeHtml(ev.text)}</div>`;
           strip.insertBefore(d, strip.firstChild);
           if (window.VLAnim) VLAnim.reveal(d, 'vl-pop');
-          while (strip.children.length > 28) strip.removeChild(strip.lastChild);
+          while (strip.children.length > 200) strip.removeChild(strip.lastChild);
         }
         if (ev.type === 'violation_new') {
           traceMark('rules', 'active');
@@ -151,7 +161,7 @@ $('run').addEventListener('click', async () => {
             d.innerHTML = `<img src="${ev.thumb}" alt="" loading="lazy" /><span class="zoom-hint">Tap to zoom</span><div class="c">${escapeHtml(cap)}</div>`;
             strip.insertBefore(d, strip.firstChild);
             if (window.VLAnim) VLAnim.reveal(d, 'vl-pop');
-            while (strip.children.length > 40) strip.removeChild(strip.lastChild);
+            while (strip.children.length > 200) strip.removeChild(strip.lastChild);
           }
           if (window.VLAnim) VLAnim.flash(videoShell);
         }
@@ -162,13 +172,14 @@ $('run').addEventListener('click', async () => {
           applySummary(ev);
           $('st-frame-viol').textContent = '0';
           liveFrame.style.display = 'none';
+          if ($('plate-loading')) $('plate-loading').style.display = 'none';
           const plates = ev.plates || [];
           if (plates.length) {
             $('plate-thumbs-head').style.display = 'block';
             const strip = $('thumbs');
             strip.innerHTML = '';
             strip.style.display = 'flex';
-            plates.slice().reverse().slice(0, 24).forEach((p, i) => {
+            plates.slice().reverse().slice(0, 200).forEach((p, i) => {
               const d = document.createElement('div');
               d.className = 't';
               d.innerHTML = `<img src="${p.thumb}" alt="" loading="lazy" /><span class="zoom-hint">Tap to zoom</span><div class="c">${escapeHtml(p.text)}</div>`;
@@ -208,6 +219,7 @@ $('run').addEventListener('click', async () => {
         if (ev.type === 'error') {
           liveBadge.style.display = 'none';
           videoShell.classList.remove('video-shell--live');
+          if ($('plate-loading')) $('plate-loading').style.display = 'none';
           showToast(ev.message || 'Error', 'err');
         }
       }

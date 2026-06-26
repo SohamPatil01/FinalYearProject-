@@ -180,7 +180,7 @@ def get_lprnet_reader():
 
 
 def get_paddle_reader():
-    """Lazy singleton PaddleOCR reader."""
+    """Lazy singleton PaddleOCR reader (supports PaddleOCR 3.x and the older 2.x API)."""
     global _paddle_reader
     if _paddle_reader is not None:
         return _paddle_reader
@@ -189,18 +189,77 @@ def get_paddle_reader():
     except Exception:
         return None
     lang = str(getattr(config, "PADDLEOCR_LANG", "en") or "en")
-    use_gpu = bool(getattr(config, "PADDLEOCR_USE_GPU", False))
-    use_cls = bool(getattr(config, "PADDLEOCR_USE_ANGLE_CLS", True))
+    use_cls = bool(getattr(config, "PADDLEOCR_USE_ANGLE_CLS", False))
+    # PaddleOCR 3.x: plate crops are already tight, so skip the heavy document
+    # orientation / unwarping stages (faster construct + inference, same accuracy).
     try:
-        _paddle_reader = PaddleOCR(use_textline_orientation=use_cls, lang=lang, use_gpu=use_gpu)
+        _paddle_reader = PaddleOCR(
+            lang=lang,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            use_textline_orientation=use_cls,
+        )
     except TypeError:
+        # Older 2.x signature.
         try:
-            _paddle_reader = PaddleOCR(use_angle_cls=use_cls, lang=lang, use_gpu=use_gpu)
-        except TypeError:
             _paddle_reader = PaddleOCR(use_angle_cls=use_cls, lang=lang)
+        except Exception:
+            return None
     except Exception:
         return None
     return _paddle_reader
+
+
+def _paddle_predict_candidates(reader: Any, im: np.ndarray) -> Optional[List[Tuple[float, str, float]]]:
+    """PaddleOCR 3.x ``predict`` → [(x_center, text, conf)]. None if this API isn't available."""
+    if not hasattr(reader, "predict"):
+        return None
+    try:
+        results = reader.predict(im)
+    except Exception:
+        return None
+    cand: List[Tuple[float, str, float]] = []
+    for r in results:
+        try:
+            texts = r.get("rec_texts") or []
+            scores = r.get("rec_scores") or []
+            polys = r.get("rec_polys") or r.get("dt_polys") or []
+        except AttributeError:
+            return None
+        for i, txt in enumerate(texts):
+            conf = float(scores[i]) if i < len(scores) else 0.0
+            try:
+                xc = float(np.mean(np.asarray(polys[i])[:, 0])) if i < len(polys) else 0.0
+            except Exception:
+                xc = 0.0
+            cand.append((xc, str(txt), conf))
+    return cand
+
+
+def _paddle_ocr_candidates(reader: Any, im: np.ndarray) -> List[Tuple[float, str, float]]:
+    """PaddleOCR 2.x ``ocr`` → [(x_center, text, conf)]."""
+    try:
+        raw = reader.ocr(im, cls=bool(getattr(config, "PADDLEOCR_USE_ANGLE_CLS", False)))
+    except TypeError:
+        raw = reader.ocr(im)
+    except Exception:
+        return []
+    cand: List[Tuple[float, str, float]] = []
+    rows = raw if isinstance(raw, list) else []
+    if rows and isinstance(rows[0], list) and len(rows) == 1:
+        rows = rows[0]
+    for r in rows:
+        if not isinstance(r, (list, tuple)) or len(r) < 2:
+            continue
+        box, txtc = r[0], r[1]
+        if not isinstance(txtc, (list, tuple)) or len(txtc) < 2:
+            continue
+        try:
+            xc = float(np.mean(np.asarray(box)[:, 0]))
+        except Exception:
+            xc = 0.0
+        cand.append((xc, str(txtc[0]), float(txtc[1])))
+    return cand
 
 
 def get_plate_reader(lang_list: Optional[List[str]] = None):
@@ -412,6 +471,54 @@ def _normalize_plate_text(text: str) -> str:
     else:
         t = re.sub(r"[^A-Za-z0-9]", "", text)
     return t.upper()
+
+
+# Characters EasyOCR routinely confuses between glyph-similar letters and digits.
+_DIGIT_FROM_ALPHA = {
+    "O": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "J": "1",
+    "Z": "2", "A": "4", "S": "5", "G": "6", "T": "7", "B": "8",
+}
+_ALPHA_FROM_DIGIT = {"0": "O", "1": "I", "2": "Z", "4": "A", "5": "S", "6": "G", "7": "T", "8": "B"}
+
+# Indian plate: 2 state letters, 1-2 RTO digits, 1-3 series letters, 4 number digits.
+_INDIAN_PLATE_RE = re.compile(r"^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4}$")
+
+
+def looks_like_indian_plate(text: str) -> bool:
+    """True when ``text`` (ignoring spaces) matches the standard Indian plate layout."""
+    raw = re.sub(r"[^A-Z0-9]", "", (text or "").upper())
+    return bool(_INDIAN_PLATE_RE.match(raw))
+
+
+def correct_indian_plate(text: str) -> str:
+    """Best-effort fix of glyph confusions using the canonical ``LL DD L(L) DDDD`` layout.
+
+    Only rewrites when the read already has a plausible 9-10 char length; garbled
+    reads of the wrong length are returned unchanged (we can't recover missing chars).
+    """
+    raw = re.sub(r"[^A-Z0-9]", "", (text or "").upper())
+    n = len(raw)
+    if n not in (9, 10):
+        return text
+    s = list(raw)
+
+    def to_alpha(i: int) -> None:
+        s[i] = _ALPHA_FROM_DIGIT.get(s[i], s[i])
+
+    def to_digit(i: int) -> None:
+        s[i] = _DIGIT_FROM_ALPHA.get(s[i], s[i])
+
+    # state (2 alpha) | rto (2 digit) | series (n-8 alpha) | number (4 digit)
+    to_alpha(0)
+    to_alpha(1)
+    to_digit(2)
+    to_digit(3)
+    for i in range(4, n - 4):
+        to_alpha(i)
+    for i in range(n - 4, n):
+        to_digit(i)
+    fixed = "".join(s)
+    return fixed if _INDIAN_PLATE_RE.match(fixed) else text
 
 
 def _merge_readtext_results(results: Sequence[Tuple[Any, str, Any]]) -> Tuple[str, float]:
@@ -677,31 +784,14 @@ def _read_plate_paddle(reader: Any, crop_bgr: np.ndarray) -> Tuple[str, float]:
         if pg is not None and pg.size > 0:
             variants.append(cv2.cvtColor(pg, cv2.COLOR_GRAY2BGR))
     for im in variants[:2]:
-        try:
-            raw = reader.ocr(im, cls=bool(getattr(config, "PADDLEOCR_USE_ANGLE_CLS", True)))
-        except TypeError:
-            raw = reader.ocr(im)
-        except Exception:
-            continue
+        raw_cand = _paddle_predict_candidates(reader, im)
+        if raw_cand is None:
+            raw_cand = _paddle_ocr_candidates(reader, im)
         cand: List[Tuple[float, str, float]] = []
-        rows = raw if isinstance(raw, list) else []
-        if rows and isinstance(rows[0], list) and len(rows) == 1:
-            rows = rows[0]
-        for r in rows:
-            if not isinstance(r, (list, tuple)) or len(r) < 2:
-                continue
-            box, txtc = r[0], r[1]
-            if not isinstance(txtc, (list, tuple)) or len(txtc) < 2:
-                continue
-            txt = _normalize_plate_text(str(txtc[0]))
-            if not txt:
-                continue
-            conf = float(txtc[1])
-            try:
-                xc = float(np.mean(np.asarray(box)[:, 0]))
-            except Exception:
-                xc = 0.0
-            cand.append((xc, txt, conf))
+        for xc, raw_txt, conf in raw_cand:
+            txt = _normalize_plate_text(raw_txt)
+            if txt:
+                cand.append((xc, txt, conf))
         if not cand:
             continue
         cand.sort(key=lambda x: x[0])
@@ -729,13 +819,13 @@ def read_plate_from_crop(reader: Any, crop_bgr: np.ndarray) -> Tuple[str, float]
     if engine == "paddle":
         pr = reader if reader is not None else get_paddle_reader()
         txt, conf = _read_plate_paddle(pr, crop_bgr)
-        if txt:
-            return txt, conf
-        if bool(getattr(config, "PLATE_OCR_FALLBACK_TO_EASYOCR", True)):
-            eo_reader = get_easyocr_reader()
-            return _read_plate_easyocr(eo_reader, crop_bgr)
-        return "", 0.0
-    return _read_plate_easyocr(reader if reader is not None else get_easyocr_reader(), crop_bgr)
+        if not txt and bool(getattr(config, "PLATE_OCR_FALLBACK_TO_EASYOCR", True)):
+            txt, conf = _read_plate_easyocr(get_easyocr_reader(), crop_bgr)
+    else:
+        txt, conf = _read_plate_easyocr(reader if reader is not None else get_easyocr_reader(), crop_bgr)
+    if txt and bool(getattr(config, "PLATE_OCR_INDIAN_STYLE", False)):
+        txt = correct_indian_plate(txt)
+    return txt, conf
 
 
 def _point_in_bbox(px: float, py: float, bbox: Sequence[int]) -> bool:

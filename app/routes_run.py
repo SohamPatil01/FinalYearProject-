@@ -125,6 +125,9 @@ async def api_run_stream(
             seen_zone_keys: Set[Tuple[Any, ...]] = set()
             zone_recent: List[Dict[str, Any]] = []
             for ev in iter_decode_media(in_path, out_path, pipeline):
+                if ev["kind"] == "ocr_start":
+                    yield sse_pack({"type": "plates_loading", "total": int(ev.get("total", 0))})
+                    continue
                 if ev["kind"] == "frame":
                     _fi = int(ev["frame_idx"])
                     for eng_ev in ev["meta"].get("engine_events") or []:
@@ -178,26 +181,27 @@ async def api_run_stream(
                     for snap in ev["meta"].get("violation_snapshots") or []:
                         t_sec = round((_fi * ev["dec_skip"]) / max(ev["fps"], 1e-6), 1)
                         msg = str(snap.get("message") or "Violation")
+                        snap_plate = str(snap.get("plate") or "")
                         thumb = thumb_data_uri(snap["thumb_rgb"])
                         zone_recent.append(
                             {
                                 "t_sec": t_sec,
                                 "vid": "—",
                                 "zone": "—",
-                                "plate": "",
+                                "plate": snap_plate,
                                 "frame": _fi,
                                 "kind": "rule",
                                 "summary": msg,
                             }
                         )
-                        _save_violation(camera, msg, "", "", "", None, _fi, t_sec, thumb)
+                        _save_violation(camera, msg, "", "", snap_plate, None, _fi, t_sec, thumb)
                         yield sse_pack(
                             {
                                 "type": "violation_new",
                                 "summary": msg,
                                 "zone": "—",
                                 "vid": "—",
-                                "plate": "",
+                                "plate": snap_plate,
                                 "frame": _fi,
                                 "t_sec": t_sec,
                                 "violation_type": msg,

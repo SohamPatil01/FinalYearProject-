@@ -85,13 +85,14 @@ PLATE_MODEL_KEY = "plate"
 # Plate text recognition engine for **plate crops only**.
 # - "easyocr": EasyOCR (default)
 # - "paddle": PaddleOCR (optional)
-PLATE_OCR_ENGINE: str = "easyocr"
+PLATE_OCR_ENGINE: str = "paddle"
 # If PaddleOCR is unavailable / fails, optionally fall back to EasyOCR.
 PLATE_OCR_FALLBACK_TO_EASYOCR: bool = True
 # PaddleOCR options
 PADDLEOCR_LANG: str = "en"
 PADDLEOCR_USE_GPU: bool = False
-PADDLEOCR_USE_ANGLE_CLS: bool = True
+# Plate crops are upright; angle classification adds latency for little gain.
+PADDLEOCR_USE_ANGLE_CLS: bool = False
 
 # EasyOCR languages (e.g. add "hi" for Devanagari if your plates need it)
 EASYOCR_LANGS: List[str] = ["en"]
@@ -145,6 +146,13 @@ PLATE_DRAW_INNER_YOLO_BOX: bool = True
 # If False: no tracker — OCR runs on plate YOLO boxes directly (``ocr_plate_detections_one_shot``), throttled by
 # ``PLATE_OCR_ATTEMPT_EVERY_N_FRAMES``. Simpler but heavier CPU, jittery track IDs, and no stability voting.
 PLATE_USE_TRACK_OCR_GATE: bool = True
+# Two-phase ("deferred") plate OCR. When True, OCR does NOT run while the video is
+# decoding -- the pipeline only DETECTS and tracks plates and keeps the single
+# sharpest crop per plate. Once the whole video has finished processing, every
+# collected crop is sent to OCR in one batch and the reads fill in. This keeps
+# live playback fast (no per-frame OCR work) and reads from the best crop of each
+# plate, which is more accurate. Single still images always OCR immediately.
+PLATE_OCR_DEFERRED: bool = True
 PLATE_TRACK_MAX_DISTANCE: int = 110
 # Keep a locked plate's track alive across longer detection gaps so the box "stays".
 PLATE_TRACK_MAX_DISAPPEARED: int = 40
@@ -165,6 +173,11 @@ PLATE_OCR_STABLE_FRAMES: int = 2
 # Plates on moving vehicles drift more than a few px/frame; allow that and still count as stable.
 PLATE_OCR_MAX_CENTROID_DRIFT: float = 48.0
 PLATE_OCR_MIN_TEXT_LEN: int = 4
+# A read is only shown as a confirmed plate when it either matches the Indian plate
+# layout OR clears this confidence. Otherwise the crop is kept but its text is left
+# blank instead of displaying a confidently-wrong string (e.g. a blurry far plate
+# that OCR turns into garbage). Lower this if real reads are being hidden.
+PLATE_OCR_DISPLAY_MIN_CONF: float = 0.35
 # Confirm a plate read by agreement across this many OCR reads (confidence-weighted vote)
 # before locking it — corrects single-frame OCR mistakes. Set to 1 to lock on the first read.
 PLATE_OCR_CONFIRM_READS: int = 2
@@ -287,21 +300,21 @@ MODEL_CATALOG: List[ModelCatalogEntry] = [
         "file": "truck.pt",
         "title": "Truck",
         "summary": "Detects trucks / heavy vehicles; restricted-hours rule when the clock is in the active window.",
-        "description": "When enabled: **Truck in restricted hours** uses the configured time window (and optional separate `TRUCK_RESTRICTED_*` hours if `TRUCK_RESTRICTED_MATCH_VIOLATION_WINDOW` is off). **Plates** use **Number plate** (`plate.pt`) + EasyOCR on crops, optionally ROI-prioritized around trucks.",
+        "description": "When enabled: **Truck in restricted hours** uses the configured time window (and optional separate `TRUCK_RESTRICTED_*` hours if `TRUCK_RESTRICTED_MATCH_VIOLATION_WINDOW` is off). **Plates** use **Number plate** (`plate_best.pt`) + OCR on crops, optionally ROI-prioritized around trucks.",
     },
     {
         "id": "triple",
         "file": "triple.pt",
         "title": "Triple seat",
         "summary": "Triple-seat violations: assigns **person** detections to **vehicles** (bike, rickshaw, …) and fires when count ≥ `TRIPLE_MIN_PERSONS_ON_MOTORCYCLE` (configurable).",
-        "description": "Turn this on for **triple-seat** rules. The checkpoint is usually multi-class (vehicle + person; some also include a plate label). Plate **text** still comes only from **Number plate** (`plate.pt` + OCR) — any plate-like class here is ignored for OCR when Number plate is enabled, so counts and overlays stay correct.",
+        "description": "Turn this on for **triple-seat** rules. The checkpoint is usually multi-class (vehicle + person; some also include a plate label). Plate **text** still comes only from **Number plate** (`plate_best.pt` + OCR) — any plate-like class here is ignored for OCR when Number plate is enabled, so counts and overlays stay correct.",
     },
     {
         "id": "helmet",
-        "file": "helmet.pt",
+        "file": "helmet_best.pt",
         "title": "Helmet",
         "summary": "Detects riders / helmets; flags **no-helmet** classes (e.g. `no_helmet`).",
-        "description": "Uses `models/helmet.pt`. Violations fire on detections whose class name matches **without helmet** (see `HELMET_VIOLATION_CLASS_IDS` to override). Number plates still use **Number plate** (`plate.pt`) + OCR.",
+        "description": "Uses `models/helmet_best.pt`. Violations fire on detections whose class name matches **without helmet** (see `HELMET_VIOLATION_CLASS_IDS` to override). Number plates still use **Number plate** (`plate_best.pt`) + OCR.",
     },
     {
         "id": "plate",
@@ -351,13 +364,17 @@ TRIPLE_VIOLATION_CLASS_IDS: List[int] = []
 # When True (default), load triple YOLO `.names` and only count classes that look like "triple"
 # (and exclude "double"-like names when the model has multiple classes).
 TRIPLE_AUTO_CLASS_FILTER: bool = True
-# Drop low-confidence triple detections (try 0.4–0.55 if you still get double FPs on a single-class model).
-TRIPLE_MIN_CONFIDENCE: float = 0.0
+# Drop low-confidence triple detections before counting. The triple checkpoint has low
+# precision (many weak false person/bike boxes), and with a 0.0 floor every one of them
+# was counted -- the main false-positive source. 0.35 keeps confident riders and discards
+# the junk boxes that were inflating the person-per-bike count.
+TRIPLE_MIN_CONFIDENCE: float = 0.35
 # Overlapping triple boxes (same bike, duplicate heads) merge into one violation above this IoU.
 TRIPLE_MERGE_IOU: float = 0.5
 # Require this many consecutive frames with a detection in the same screen cell (reduces one-off FPs).
-# Set to 1 to flag triple riding as soon as geometry passes (same frame).
-TRIPLE_MIN_CONSECUTIVE_FRAMES: int = 1
+# Raised 1 -> 2 so a single-frame flicker no longer fires a violation; a genuine triple
+# persists across frames and still confirms quickly.
+TRIPLE_MIN_CONSECUTIVE_FRAMES: int = 2
 # Cell size (px) for grouping the same bike across frames for the streak counter.
 TRIPLE_STREAK_CELL_PX: int = 72
 
@@ -366,7 +383,9 @@ TRIPLE_STREAK_CELL_PX: int = 72
 # (motorcycle, scooter, rickshaw, etc. — see `violations._carrier_vehicle_class_name`). Default **3** = triple seat.
 TRIPLE_MIN_PERSONS_ON_MOTORCYCLE: int = 3
 # Grow the motorcycle box by this fraction of its width/height when deciding if a person is on that bike.
-TRIPLE_MC_EXPAND_FRAC: float = 0.2
+# Raised 0.2 -> 0.28 so a pillion / third rider whose centroid sits just outside the tight
+# bike box is still associated to it (improves recall on real triple-seat cases).
+TRIPLE_MC_EXPAND_FRAC: float = 0.28
 # Also count the person if IoU with the (unexpanded) motorcycle box is at least this much.
 TRIPLE_MC_PERSON_IOU_MIN: float = 0.04
 # NMS among person boxes on the triple head before counting (reduces duplicate heads).
@@ -483,6 +502,14 @@ DASHBOARD_GC_EVERY_N_FRAMES: int = 0
 DASHBOARD_SIDEBAR_PLATE_THUMB: int = 132
 # Max plate captures kept per run (oldest dropped).
 DASHBOARD_PLATE_GALLERY_MAX_ITEMS: int = 80
+# Also show the cropped plate image as soon as a plate is DETECTED, even if OCR
+# hasn't produced a confident read yet. Without this, the "PLATE READS" gallery
+# only fills after OCR locks text -- so on footage where plates are too small to
+# read, you'd see boxes on the video but no extracted-plate thumbnails at all.
+PLATE_GALLERY_INCLUDE_PENDING: bool = True
+# Minimum plate-detector confidence before a not-yet-read plate is added to the
+# gallery (keeps weak false plate boxes out of the strip).
+PLATE_GALLERY_PENDING_MIN_YOLO: float = 0.45
 
 # FastAPI live stream: max width (px) for JPEG frames over SSE; 0 = full resolution (heavy).
 WEB_STREAM_PREVIEW_MAX_WIDTH: int = 960

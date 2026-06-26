@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import cv2
 
@@ -89,26 +89,63 @@ def append_plate_capture_from_frame(
     captures: List[Dict[str, Any]],
     max_items: int,
     thumb_w: int,
+    store_crop: bool = False,
+    track_best: Optional[Dict[Any, float]] = None,
 ) -> None:
+    """Collect plate crop thumbnails into ``captures``.
+
+    Normal mode keeps the first decent crop per (track[, text]). When ``track_best``
+    is provided (deferred-OCR mode), it instead keeps the single *highest quality*
+    crop per track -- replacing the earlier crop in place when a sharper/larger one
+    appears -- so the batch OCR at the end reads from the best available image.
+    ``store_crop`` additionally retains the full-resolution BGR crop (``crop_bgr``)
+    needed by that later OCR pass.
+    """
     if frame_bgr is None:
         return
+    include_pending = bool(getattr(config, "PLATE_GALLERY_INCLUDE_PENDING", False))
+    pending_min_yolo = float(getattr(config, "PLATE_GALLERY_PENDING_MIN_YOLO", 0.45))
     h, w = frame_bgr.shape[:2]
     for p in plates:
-        if p.get("pending"):
-            continue
-        text = (str(p.get("text") or "")).strip()
-        if len(text) < 1:
-            continue
         tid = p.get("track_id", -1)
-        key = (tid, text)
-        if key in seen:
+        text = (str(p.get("text") or "")).strip()
+        is_read = (not p.get("pending")) and len(text) >= 1
+        yolo_conf = float(p.get("yolo_conf", 0.0))
+        # Deferred OCR: pick the best crop per track (no text yet, so always "pending").
+        best_mode = track_best is not None and not is_read
+
+        if is_read:
+            # Confirmed OCR read: one capture per (track, text).
+            key: Any = (tid, text)
+            if key in seen:
+                continue
+        elif best_mode or include_pending:
+            # Plate detected but not yet read -> still show the crop so the
+            # extracted-plate image is visible even before/without an OCR read.
+            if yolo_conf < pending_min_yolo:
+                continue
+            if not best_mode:
+                key = ("pending", tid)
+                if key in seen:
+                    continue
+        else:
             continue
-        seen.add(key)
+
         x1, y1, x2, y2 = [int(x) for x in p["bbox"]]
         x1, y1 = max(0, x1), max(0, y1)
         x2, y2 = min(w, x2), min(h, y2)
         if x2 <= x1 or y2 <= y1:
             continue
+
+        if best_mode:
+            # Quality proxy: confident, large, sharp crops read best.
+            area = (x2 - x1) * (y2 - y1)
+            sharp = float(p.get("sharpness", 0.0)) or 1.0
+            quality = yolo_conf * (area ** 0.5) * sharp
+            prev_q = track_best.get(tid)
+            if prev_q is not None and quality <= prev_q:
+                continue
+
         # Same padded crop as EasyOCR uses in ``read_plate_from_crop`` (``_safe_crop``).
         crop = _safe_crop(frame_bgr, x1, y1, x2, y2)
         if crop.size == 0:
@@ -116,16 +153,31 @@ def append_plate_capture_from_frame(
         crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
         tw = max(48, int(thumb_w))
         thumb = resize_preview_rgb(crop_rgb, tw) if crop_rgb.shape[1] > tw else crop_rgb
-        captures.append(
-            {
-                "text": text,
-                "frame": frame_idx,
-                "tid": tid,
-                "thumb_rgb": thumb,
-                "ocr": float(p.get("confidence", 0.0)),
-                "yolo": float(p.get("yolo_conf", 0.0)),
-            }
-        )
+        item: Dict[str, Any] = {
+            "text": text if is_read else "reading…",
+            "frame": frame_idx,
+            "tid": tid,
+            "thumb_rgb": thumb,
+            "ocr": float(p.get("confidence", 0.0)),
+            "yolo": yolo_conf,
+        }
+        if store_crop:
+            item["crop_bgr"] = crop
+
+        if best_mode:
+            if track_best.get(tid) is not None:
+                for i, c in enumerate(captures):
+                    if c.get("tid") == tid:
+                        captures[i] = item
+                        break
+                else:
+                    captures.append(item)
+            else:
+                captures.append(item)
+            track_best[tid] = quality
+        else:
+            seen.add(key)
+            captures.append(item)
         while len(captures) > max_items:
             captures.pop(0)
 

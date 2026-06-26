@@ -10,7 +10,12 @@ import cv2
 
 import config
 from utils.detectors import MultiModelDetector, expand_bbox_xyxy
-from utils.plate_ocr import get_plate_reader, ocr_plate_detections_one_shot
+from utils.plate_ocr import (
+    get_plate_reader,
+    looks_like_indian_plate,
+    ocr_plate_detections_one_shot,
+    read_plate_from_crop,
+)
 from utils.plate_track_ocr import PlateOCRGate
 from utils.tracker import CentroidTracker
 from utils.events import merge_snapshots, normalize_engine_events
@@ -497,6 +502,41 @@ class TrafficPipeline:
             return None
         return crop
 
+    def _plate_text_in_region(
+        self, frame_bgr: Any, region_bbox: List[int], plate_dets: List[dict]
+    ) -> str:
+        """Read the number plate that sits inside a violation region (if any).
+
+        Only the plate sub-crop is sent to OCR -- never the whole violation image --
+        so we can show the violation and its plate number combined on one card.
+        """
+        if frame_bgr is None or not plate_dets:
+            return ""
+        rx1, ry1, rx2, ry2 = [int(v) for v in region_bbox]
+        best, best_area = None, 0
+        for d in plate_dets:
+            b = [int(v) for v in d["bbox"]]
+            ix1, iy1 = max(rx1, b[0]), max(ry1, b[1])
+            ix2, iy2 = min(rx2, b[2]), min(ry2, b[3])
+            inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+            parea = max(1, (b[2] - b[0]) * (b[3] - b[1]))
+            # Plate must be mostly inside the violation region.
+            if inter / parea >= 0.5 and parea > best_area:
+                best, best_area = d, parea
+        if best is None:
+            return ""
+        crop = self._crop_bbox_bgr(frame_bgr, [int(v) for v in best["bbox"]])
+        if crop is None:
+            return ""
+        try:
+            txt, conf = read_plate_from_crop(self._get_ocr_reader(), crop)
+        except Exception:
+            return ""
+        min_conf = float(getattr(config, "PLATE_OCR_DISPLAY_MIN_CONF", 0.0))
+        if txt and (looks_like_indian_plate(txt) or float(conf) >= min_conf):
+            return txt
+        return ""
+
     def _collect_violation_snapshots(
         self,
         frame_bgr: Any,
@@ -511,6 +551,11 @@ class TrafficPipeline:
         Uses the same raw messages as violation checks (before string dedup).
         """
         out: List[Dict[str, Any]] = []
+        plate_dets = (
+            [d for d in detections_for_rules if d["model"] == config.PLATE_MODEL_KEY]
+            if self.use_plate
+            else []
+        )
         truck_dets_sorted = sorted(
             [d for d in detections_for_rules if d["model"] == "truck"],
             key=lambda d: float(d["bbox"][0]),
@@ -560,7 +605,8 @@ class TrafficPipeline:
                 continue
             self._violation_snapshot_seen.add(key)
             rgb = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2RGB)
-            out.append({"message": msg, "bbox": list(bbox), "thumb_rgb": rgb})
+            plate_txt = self._plate_text_in_region(frame_bgr, bbox, plate_dets)
+            out.append({"message": msg, "bbox": list(bbox), "thumb_rgb": rgb, "plate": plate_txt})
         return out
 
     @classmethod
